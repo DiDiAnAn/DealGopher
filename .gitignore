@@ -1,0 +1,34 @@
+# ===== 运行时生成（绝对不要提交）=====
+# 里面是个人数据、登录态（chrome_profile 里就是淘宝/京东的登录凭证）
+data/
+logs/
+price_records.xlsx
+*.log
+
+# ===== 打包产物（体积很大，走 GitHub Releases 上传 zip，不进仓库）=====
+dist/
+build/
+*.spec.bak
+
+# ===== 虚拟环境与缓存 =====
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# ===== 编辑器 / 系统 =====
+.idea/
+.vscode/
+*.swp
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# ===== 本地测试产物 =====
+# 图标源文件保留（icons/ 与 app.ico 需要提交），这里只排除临时生成的预览图
+icons/*_64.png
+icons/尺寸预览.png
+icons/金点尺寸预览.png
+icons/亮金尺寸预览.png

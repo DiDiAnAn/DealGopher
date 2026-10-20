@@ -1,0 +1,13 @@
+# 商品价格监控系统 运行依赖
+# 版本以实际验证可用的组合为准（Python 3.13.7）
+PyQt5==5.15.11
+selenium==4.27.1
+matplotlib==3.10.0
+openpyxl==3.1.5
+pygame==2.6.1
+
+# 说明：
+# - openpyxl：导出 price_records.xlsx（main_window 中延迟导入，缺失会静默跳过导出）
+# - pygame：价格达标时循环播放提示音（alert_dialog 中延迟导入）
+# - requests / apscheduler：原依赖清单里有，但代码中没有任何 import，已移除
+#   （调度用的是 QTimer，没有用 apscheduler）

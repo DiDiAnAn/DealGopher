@@ -1,0 +1,33 @@
+﻿# PyInstaller 版本信息资源
+# 让 exe 的「属性 → 详细信息」里显示作者、版权、版本号
+VSVersionInfo(
+    ffi=FixedFileInfo(
+        filevers=(1, 5, 0, 0),
+        prodvers=(1, 5, 0, 0),
+        mask=0x3F,
+        flags=0x0,
+        OS=0x40004,
+        fileType=0x1,
+        subtype=0x0,
+        date=(0, 0),
+    ),
+    kids=[
+        StringFileInfo([
+            StringTable(
+                '080404B0',
+                [
+                    StringStruct('CompanyName', '安安'),
+                    StringStruct('FileDescription', '商品价格监控系统 - 商品价格监控与历史记录'),
+                    StringStruct('FileVersion', '1.5.0'),
+                    StringStruct('InternalName', 'PriceMonitor'),
+                    StringStruct('LegalCopyright', '版权所有 (C) 2026 安安 · 仅供个人使用，未经授权禁止分享或商用'),
+                    StringStruct('OriginalFilename', '商品价格监控系统.exe'),
+                    StringStruct('ProductName', '商品价格监控系统'),
+                    StringStruct('ProductVersion', '1.5.0'),
+                    StringStruct('Comments', '支持淘宝 / 天猫 / 京东 / 拼多多 / 抖音商城'),
+                ],
+            )
+        ]),
+        VarFileInfo([VarStruct('Translation', [2052, 1200])]),
+    ],
+)
