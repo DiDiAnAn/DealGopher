@@ -113,7 +113,7 @@ price_monitor/
 
 ## 下载与安装
 
-- **普通用户**：到 [Releases](https://github.com/DiDiAnAn/-V1.5.0/releases/latest) 下载 `商品价格监控系统V1.5.0_win64.zip`，解压后双击 `商品价格监控系统V1.5.0.exe` 即可运行（`_internal` 文件夹必须与 exe 放在一起）。
+- **普通用户**：到 [Releases](https://github.com/DiDiAnAn/PriceMonitor/releases/latest) 下载 `商品价格监控系统V1.5.0_win64.zip`，解压后双击 `商品价格监控系统V1.5.0.exe` 即可运行（`_internal` 文件夹必须与 exe 放在一起）。
 - **开发者**：按下方「源码运行」从仓库拉取代码自行运行或打包。
 
 > 运行环境：Windows 10/11 64 位 + 已安装 Chrome 或 Edge。首次运行需在程序内登录一次购物平台。
