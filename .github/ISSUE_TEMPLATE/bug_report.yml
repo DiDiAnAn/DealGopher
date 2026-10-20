@@ -1,0 +1,101 @@
+name: 问题反馈
+description: 报告程序缺陷、闪退或抓取异常
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢反馈！信息填得越完整，定位越快。
+
+        **如果是闪退**，请务必附上程序目录下 `logs\crash.log` 的内容。
+
+  - type: input
+    id: version
+    attributes:
+      label: 程序版本
+      description: 主窗口左下角显示的版本号
+      placeholder: "V1.5.0"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: platform
+    attributes:
+      label: 涉及的购物平台
+      multiple: true
+      options:
+        - 淘宝
+        - 天猫
+        - 京东
+        - 拼多多
+        - 抖音商城
+        - 与平台无关（界面 / 导出 / 提醒等问题）
+    validations:
+      required: true
+
+  - type: input
+    id: system
+    attributes:
+      label: 系统与显示缩放
+      description: 在「设置 → 系统 → 显示」里可以看缩放比例，高 DPI 相关问题需要这个信息
+      placeholder: "Windows 11 23H2 / 缩放 125%"
+    validations:
+      required: true
+
+  - type: input
+    id: browser
+    attributes:
+      label: 使用的浏览器及版本
+      placeholder: "Google Chrome 155.0.8059.80"
+    validations:
+      required: false
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      description: 越具体越好
+      value: |
+        1.
+        2.
+        3.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期望结果
+    validations:
+      required: false
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: 实际结果
+      description: 界面报错文字、错误弹窗内容等
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: 日志内容
+      description: |
+        程序目录下 `logs\app_YYYYMMDD.log` 的末尾 50 行左右；
+        如果发生过闪退，请一并附上 `logs\crash.log`。
+        （提交前请删除其中可能包含商品链接、账号名的行）
+      render: text
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: 确认
+      options:
+        - label: 我已使用最新版本，并搜索过现有 Issue
+          required: true
+        - label: 我已删除日志中涉及个人账号或商品链接的敏感信息
+          required: true
