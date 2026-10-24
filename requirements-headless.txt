@@ -1,0 +1,7 @@
+# 蹲价 headless 版（NAS / Linux 容器）依赖
+# 桌面版用的 PyQt5 / matplotlib / pygame 在容器里不需要，全部去掉
+
+selenium==4.27.1
+
+# 可选：需要容器内同时生成 price_records.xlsx 时才有用（PM_WRITE_XLSX=1）
+openpyxl==3.1.5

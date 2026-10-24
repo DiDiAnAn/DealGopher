@@ -1,0 +1,28 @@
+# 构建镜像时排除的内容（不影响仓库本身，只影响 docker build 上下文体积）
+.git/
+.venv/
+__pycache__/
+*.pyc
+
+# 运行时数据与产物（绝不能打进镜像：含登录态、个人数据）
+data/
+logs/
+dist/
+build/
+price_records.xlsx
+upload_queue.json
+
+# 桌面版才需要的资源
+icons/
+app.ico
+app_icon.png
+
+# 文档与模板（镜像里用不到）
+README.md
+使用说明.txt
+LICENSE
+.github/
+version_info.txt
+build.spec
+docker-compose.nas.yml
+docker/

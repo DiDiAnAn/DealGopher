@@ -9,12 +9,19 @@
 2. 常见安装路径（Program Files / Program Files(x86) / LocalAppData）
 3. 版本号：卸载注册表 DisplayVersion → 安装目录下的版本号子目录
 
-winreg 仅 Windows 可用，本程序本身也只面向 Windows。
+winreg 仅 Windows 可用。在 Linux（NAS / 容器）里没有 winreg，
+此时检测函数返回空字典，由调用方用环境变量指定浏览器与驱动路径。
 """
 import os
 import re
-import winreg
 from typing import Dict, List
+
+try:
+    import winreg
+    IS_WINDOWS = True
+except ImportError:      # Linux / macOS
+    winreg = None
+    IS_WINDOWS = False
 
 APP_PATHS_KEY = r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths"
 UNINSTALL_KEY = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"
@@ -46,8 +53,13 @@ BROWSERS = {
 _VERSION_DIR_RE = re.compile(r"^\d+(\.\d+){1,3}$")
 
 # 注册表读取时依次尝试的视图（64 位 / 32 位 / 默认）
-_HIVES = (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER)
-_VIEWS = (winreg.KEY_WOW64_64KEY, winreg.KEY_WOW64_32KEY, 0)
+# 注意：必须在 import 时就判断 IS_WINDOWS —— 直接写 winreg.XXX 会在 Linux 下报 AttributeError
+if IS_WINDOWS:
+    _HIVES = (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER)
+    _VIEWS = (winreg.KEY_WOW64_64KEY, winreg.KEY_WOW64_32KEY, 0)
+else:
+    _HIVES = ()
+    _VIEWS = ()
 
 
 def _registry_app_path(exe_name: str) -> str:
@@ -132,6 +144,9 @@ def detect_browsers() -> Dict[str, dict]:
     未安装的浏览器不会出现在结果里。
     """
     found: Dict[str, dict] = {}
+    if not IS_WINDOWS:
+        # 非 Windows（NAS / 容器）：不做注册表检测，由环境变量提供路径
+        return found
     for name, spec in BROWSERS.items():
         path = _registry_app_path(spec["exe"]) or _common_path(spec["paths"])
         if not path:

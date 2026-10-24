@@ -36,11 +36,17 @@ class BrowserEngine:
         ),
     }
 
-    def __init__(self, data_dir: str = "", browser: str = "chrome"):
+    def __init__(self, data_dir: str = "", browser: str = "chrome", headless: bool = False):
         self.data_dir = data_dir or DATA_DIR
         self.browser = browser if browser in self.BROWSER_NAMES else "chrome"
+        self.headless = bool(headless)   # 服务器/容器环境无图形界面时必须开启
         self.binary_path = ""      # 由调用方按浏览器检测结果填入
         self.last_error = ""       # 最近一次启动失败的可读原因
+
+        # Linux / 容器：用环境变量直接指定 Chromium 可执行文件
+        env_binary = os.environ.get("PM_CHROME_BINARY", "").strip()
+        if env_binary and os.path.exists(env_binary):
+            self.binary_path = env_binary
 
         self.cookie_dir = os.path.join(self.data_dir, "cookies")
 
@@ -86,6 +92,14 @@ class BrowserEngine:
         if self.binary_path and os.path.exists(self.binary_path):
             options.binary_location = self.binary_path
 
+        # 容器 / 服务器：无图形界面，必须 headless，并关掉沙箱等容器限制
+        if self.headless:
+            options.add_argument("--headless=new")
+            options.add_argument("--disable-gpu")
+            options.add_argument("--no-sandbox")
+            options.add_argument("--disable-dev-shm-usage")
+            options.add_argument("--window-size=1400,1000")
+
         for arg in (extra_args or ()):
             options.add_argument(arg)
 
@@ -101,11 +115,18 @@ class BrowserEngine:
         """
         返回与当前浏览器版本严格匹配的驱动路径
 
-        Edge 必须自己下载：Selenium Manager 用的旧域名已失效，会回退到不匹配的缓存驱动。
-        Chrome 交给 Selenium Manager（工作正常），失败时再由 start_browser 兜底下载。
+        优先级：
+        1. 环境变量 PM_CHROME_DRIVER（容器/服务器里由镜像直接提供，最稳）
+        2. 本程序缓存目录里按版本匹配好的驱动
+        3. Edge 需自行下载（Selenium Manager 的旧域名已失效）
         """
+        env_driver = os.environ.get("PM_CHROME_DRIVER", "").strip()
+        if env_driver and os.path.exists(env_driver):
+            return env_driver
+
         version = self._detected_version()
         if not version:
+            # 非 Windows 环境下拿不到版本号，交给 Selenium Manager 或环境变量
             return ""
 
         root = self._driver_root()

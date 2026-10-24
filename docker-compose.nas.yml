@@ -1,0 +1,50 @@
+# 蹲价 · NAS 部署（DSM 7 + Container Manager）
+#
+# 使用方法（在 NAS 的项目目录里）：
+#   docker compose -f docker-compose.nas.yml up -d --build
+#   docker logs -f dunjia
+#
+# 数据目录说明：
+#   /volume3/docker/dunjia/data  ← 放 products.json、cookies/、日志、登录态
+#   想换到别的卷直接改下面的 volumes 左侧路径
+
+services:
+  dunjia:
+    build:
+      context: .
+      dockerfile: docker/nas/Dockerfile
+    image: dunjia:1.6.0
+    container_name: dunjia
+    restart: unless-stopped
+
+    environment:
+      TZ: Asia/Shanghai
+      PM_DATA_DIR: /data
+      PM_HEADLESS: "1"
+      PM_TICK_SECONDS: "30"
+
+      # ── 云端看板（留空则不上传） ──────────────────────────
+      PM_UPLOAD_URL: "http://lcgp.anan-nas.top/dunjia/api/push.php"
+      PM_UPLOAD_TOKEN: "CHANGE_ME_请改成你自己的密钥"
+
+      # ── 达标推送（企业微信群机器人 webhook，留空则不推送） ──
+      PM_WEBHOOK_URL: ""
+
+      # ── 是否在容器内同时生成 xlsx（默认关闭，看板已够用） ──
+      PM_WRITE_XLSX: "0"
+
+    volumes:
+      - /volume3/docker/dunjia/data:/data
+
+    # Chromium 需要更大的 /dev/shm，否则页面容易崩
+    shm_size: "1gb"
+
+    # 部分内核上 Chromium 需要放宽 seccomp；如果启动正常可以删掉这两行
+    security_opt:
+      - seccomp=unconfined
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
