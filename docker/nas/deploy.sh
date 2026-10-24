@@ -24,6 +24,36 @@ CONTAINER="dunjia"
 log "项目目录: $APP_DIR"
 log "数据目录: $DATA_DIR"
 
+# ---------- 0. 权限检查 ----------
+IS_ROOT=0
+[ "$(id -u)" -eq 0 ] && IS_ROOT=1
+log "当前用户: $(id -un) (uid=$(id -u))  root=$IS_ROOT"
+
+if [ "$IS_ROOT" -eq 0 ]; then
+  if ! docker info >/dev/null 2>&1; then
+    cat >&2 <<EOF
+[失败] 当前用户既不是 root，也没有 docker 权限。
+
+三条出路（任选其一）：
+  1) 直接用 sudo 执行本脚本：
+       sudo bash docker/nas/deploy.sh
+
+  2) 把当前用户加入 docker 组（之后 docker 命令免 sudo）：
+       sudo synogroup --add docker $(id -un)
+       # 重新登录 SSH 生效
+
+  3) 用 root 会话执行：
+       sudo -i
+       bash /volume3/docker/dunjia/docker/nas/deploy.sh
+
+注意：即使加入了 docker 组，后面「把数据目录属主改成 UID 1000」这一步
+仍然需要 root，因为容器内进程以 1000 运行、需要写权限。
+EOF
+    exit 1
+  fi
+  warn "以非 root 身份运行：将跳过 chown，若容器报 Permission denied 请用 sudo 重跑"
+fi
+
 # ---------- 1. 前置检查 ----------
 command -v docker >/dev/null 2>&1 || die "未找到 docker，请先在套件中心安装 Container Manager"
 docker compose version >/dev/null 2>&1 || die "docker compose 不可用（需要 v2 插件）"
@@ -40,7 +70,11 @@ log "项目所在分区剩余: $((FREE_KB / 1024 / 1024)) GB"
 
 # ---------- 2. 数据目录与权限 ----------
 mkdir -p "$DATA_DIR/cookies" "$DATA_DIR/logs"
-chown -R 1000:1000 "$DATA_DIR" 2>/dev/null || warn "chown 失败（容器可能无法写入数据目录）"
+if [ "$IS_ROOT" -eq 1 ]; then
+  chown -R 1000:1000 "$DATA_DIR" 2>/dev/null || warn "chown 失败（容器可能无法写入数据目录）"
+else
+  warn "非 root：跳过 chown（数据目录需事先归属 UID 1000）"
+fi
 chmod 755 "$DATA_DIR"
 log "数据目录已就绪（容器内以 UID 1000 运行）"
 
