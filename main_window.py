@@ -296,7 +296,7 @@ class MainWindow(QMainWindow):
         # ---- 顶部工具栏 ----
         toolbar = QHBoxLayout()
 
-        title = QLabel("商品价格监控系统")
+        title = QLabel("蹲价")
         title.setFont(QFont("Microsoft YaHei", 16, QFont.Bold))
         title.setStyleSheet("color: #2c3e50;")
         toolbar.addWidget(title)
@@ -1352,7 +1352,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         """窗口关闭时保存数据并清理"""
-        logger.info("商品价格监控系统关闭")
+        logger.info("蹲价关闭")
         self._closing = True
         self.countdown_timer.stop()
         self.check_timer.stop()

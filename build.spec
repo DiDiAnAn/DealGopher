@@ -25,9 +25,9 @@ sys.path.insert(0, os.path.abspath(os.getcwd()))
 try:
     from about_info import APP_NAME, APP_VERSION
 except Exception:
-    APP_NAME, APP_VERSION = "商品价格监控系统", "1.5.0"
+    APP_NAME, APP_VERSION = "蹲价", "1.6.0"
 
-# exe 文件名带版本号：商品价格监控系统V1.5.0.exe
+# exe 文件名带版本号：蹲价V1.6.0.exe
 EXE_NAME = f"{APP_NAME}V{APP_VERSION}"
 
 datas = []

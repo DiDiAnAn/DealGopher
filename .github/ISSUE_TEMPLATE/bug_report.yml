@@ -1,4 +1,4 @@
-name: 问题反馈
+﻿name: 问题反馈
 description: 报告程序缺陷、闪退或抓取异常
 title: "[Bug] "
 labels: ["bug"]
@@ -15,7 +15,7 @@ body:
     attributes:
       label: 程序版本
       description: 主窗口左下角显示的版本号
-      placeholder: "V1.5.0"
+      placeholder: "V1.6.0"
     validations:
       required: true
 

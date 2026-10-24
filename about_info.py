@@ -4,8 +4,8 @@
 修改作者信息只改这里即可。
 """
 
-APP_NAME = "商品价格监控系统"
-APP_VERSION = "1.5.0"
+APP_NAME = "蹲价"
+APP_VERSION = "1.6.0"
 AUTHOR = "安安"
 COPYRIGHT = "版权所有 © 2026 安安"
 

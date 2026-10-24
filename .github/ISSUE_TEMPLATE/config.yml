@@ -2,13 +2,13 @@ blank_issues_enabled: false
 
 contact_links:
   - name: 📖 先看使用说明
-    url: https://github.com/DiDiAnAn/PriceMonitor/blob/main/%E4%BD%BF%E7%94%A8%E8%AF%B4%E6%98%8E.txt
+    url: https://github.com/DiDiAnAn/DealGopher/blob/main/%E4%BD%BF%E7%94%A8%E8%AF%B4%E6%98%8E.txt
     about: 安装、登录、添加商品、配置提示音的完整步骤；多数"抓不到价格"都是没登录
 
   - name: ⬇️ 下载最新版本
-    url: https://github.com/DiDiAnAn/PriceMonitor/releases/latest
+    url: https://github.com/DiDiAnAn/DealGopher/releases/latest
     about: 编译好的程序压缩包在 Releases 里，下载解压后双击 exe 即可运行
 
   - name: 📄 许可协议
-    url: https://github.com/DiDiAnAn/PriceMonitor/blob/main/LICENSE
+    url: https://github.com/DiDiAnAn/DealGopher/blob/main/LICENSE
     about: 个人使用许可：允许个人自用与修改，禁止商用与二次分发
