@@ -7,6 +7,12 @@ import matplotlib
 # 原来这里设的是 "Agg"（纯非交互后端），与下面的 FigureCanvasQTAgg 相互矛盾。
 matplotlib.use("Qt5Agg", force=True)
 
+# 中文字体：不依赖调用方（main.py）先设置，避免图例里的中文变成方块
+matplotlib.rcParams["font.sans-serif"] = [
+    "Microsoft YaHei", "SimHei", "Microsoft JhengHei", "DejaVu Sans",
+]
+matplotlib.rcParams["axes.unicode_minus"] = False
+
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 import matplotlib.dates as mdates
@@ -50,10 +56,15 @@ class PriceChartWidget(FigureCanvas):
             self.draw()
             return
 
-        # 解析时间
+        # 解析时间：只画"可信价格"的点（无货/下架/规格失效等状态不入曲线）
         dates = []
         prices = []
+        skipped = 0
         for record in history:
+            record_status = getattr(record, "status", "ok") or "ok"
+            if record_status != "ok" or (record.price or 0) <= 0:
+                skipped += 1
+                continue
             try:
                 dt = datetime.strptime(record.timestamp, "%Y-%m-%d %H:%M:%S")
                 dates.append(dt)
@@ -62,6 +73,10 @@ class PriceChartWidget(FigureCanvas):
                 continue
 
         if not dates:
+            self.ax.text(0.5, 0.5,
+                         "暂无有效价格数据" + (f"\n（{skipped} 条无货/异常记录已跳过）" if skipped else ""),
+                         ha="center", va="center", fontsize=12, color="#999999",
+                         fontfamily="Microsoft YaHei", transform=self.ax.transAxes)
             self.draw()
             return
 

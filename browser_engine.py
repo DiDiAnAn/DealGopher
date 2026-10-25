@@ -6,6 +6,7 @@ import os
 import re
 import threading
 import time
+from dataclasses import dataclass
 from typing import List, Tuple
 
 from selenium import webdriver
@@ -16,6 +17,31 @@ from paths import DATA_DIR
 from platforms import PLATFORMS
 from browser_detector import detect_browsers
 from driver_manager import download_driver, find_cached_driver
+from status import (
+    STATUS_OK, STATUS_NO_STOCK, STATUS_DELISTED,
+    STATUS_PRICE_RANGE, STATUS_SKU_MISMATCH, STATUS_UNKNOWN,
+)
+
+
+@dataclass
+class FetchResult:
+    """一次抓取的结果：价格与状态分离"""
+
+    name: str = ""
+    price: float = 0.0
+    original_price: float = 0.0
+    status: str = STATUS_UNKNOWN
+    status_text: str = ""      # 页面原文或失败原因，便于排查
+    sku_text: str = ""         # 本次实际选中的规格
+
+    @property
+    def has_price(self) -> bool:
+        return self.price > 0
+
+
+def _js_string(text: str) -> str:
+    """把 Python 字符串安全嵌入 JS 源码（转义引号、反斜杠、换行）"""
+    return json.dumps(str(text), ensure_ascii=False)
 
 
 class BrowserEngine:
@@ -91,6 +117,11 @@ class BrowserEngine:
         # 指定浏览器可执行文件，避免自动查找找错版本
         if self.binary_path and os.path.exists(self.binary_path):
             options.binary_location = self.binary_path
+
+        # 页面加载策略：eager 只等 DOMContentLoaded。
+        # 淘宝/天猫页面资源极多，默认的 normal 策略会一直等到所有图片脚本加载完，
+        # 在无头容器里常常"永远加载不完"，导致 driver.get() 长时间卡住。
+        options.page_load_strategy = "eager"
 
         # 容器 / 服务器：无图形界面，必须 headless，并关掉沙箱等容器限制
         if self.headless:
@@ -172,7 +203,15 @@ class BrowserEngine:
         """真正创建浏览器会话"""
         options = self._build_options(extra_args)
         self.driver = self._create_driver(options, executable)
-        self.driver.set_window_size(1280, 900)
+        # 无头模式没有窗口管理器，set_window_size 会一直挂住；
+        # 窗口尺寸已通过 --window-size=1400,1000 参数指定
+        if not self.headless:
+            self.driver.set_window_size(1280, 900)
+        # 兜底：即使 eager 策略下仍有资源挂起，60 秒也必须返回，交给后续解析
+        try:
+            self.driver.set_page_load_timeout(60)
+        except Exception:
+            pass
         self._inject_stealth()
         return True
 
@@ -333,7 +372,8 @@ class BrowserEngine:
         if not os.path.exists(path):
             return False
         try:
-            with open(path, "r", encoding="utf-8") as f:
+            # utf-8-sig：兼容 Windows 记事本/PowerShell 写出的带 BOM 文件
+            with open(path, "r", encoding="utf-8-sig") as f:
                 cookies = json.load(f)
             url = PLATFORMS.get(platform, {}).get("home_url", "https://www.taobao.com")
             self.driver.get(url)
@@ -433,56 +473,460 @@ class BrowserEngine:
 
     # ==================== 商品信息抓取 ====================
 
-    def fetch_product_info(self, url: str, platform: str,
-                           should_abort=None) -> Tuple[str, float, float]:
+    def fetch_product_info(self, url: str, platform: str, should_abort=None,
+                           sku_spec=None) -> "FetchResult":
         """
-        抓取商品信息：返回 (商品名称, 当前价格, 原价)
+        抓取商品信息，返回 FetchResult（名称 + 价格 + 状态）
 
-        should_abort: 可选回调，返回 True 时尽快中断本次抓取（用于超时回收 / 退出程序），
-                      中断时返回空结果，调用方据此丢弃本次抓取。
+        与旧版的区别：价格和「能不能买」分离。
+        - 页面已下架       → status=delisted，不返回价格
+        - 选中规格无货     → status=no_stock，不返回价格
+        - 规格锁定但选不中 → status=sku_mismatch，不返回价格
+        - 页面显示"最低价起" → status=price_range，价格不可信
+        - 正常             → status=ok
+
+        sku_spec: 形如 ["版本类型=中国大陆", "套餐=单机标配"]，抓取前会自动选中这些规格
         """
         abort = should_abort or (lambda: False)
 
         if abort():
-            return ("", 0.0, 0.0)
+            return FetchResult(status=STATUS_UNKNOWN, status_text="已中断")
 
         self._reset_if_dead()
 
         if not self.driver:
             if not self.start_browser():
-                return ("", 0.0, 0.0)
+                return FetchResult(status=STATUS_UNKNOWN,
+                                   status_text=self.last_error or "浏览器启动失败")
 
         self._ensure_platform_cookie(platform)
         if abort():
-            return ("", 0.0, 0.0)
+            return FetchResult(status=STATUS_UNKNOWN, status_text="已中断")
 
         try:
-            self.driver.get(url)
+            try:
+                self.driver.get(url)
+            except Exception as e:
+                # 页面加载超时不算失败：DOM 通常已就绪，继续往下解析
+                print(f"[BrowserEngine] 页面加载超时/异常，继续尝试解析: {str(e)[:120]}")
             self._wait_page_ready(8)
             if not self._sleep(1.5, abort):
-                return ("", 0.0, 0.0)
+                return FetchResult(status=STATUS_UNKNOWN, status_text="已中断")
 
             self._try_close_popups()
             self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight / 4);")
             if not self._sleep(1.5, abort):
-                return ("", 0.0, 0.0)
+                return FetchResult(status=STATUS_UNKNOWN, status_text="已中断")
             self.driver.execute_script("window.scrollTo(0, 0);")
             if not self._sleep(0.8, abort):
-                return ("", 0.0, 0.0)
+                return FetchResult(status=STATUS_UNKNOWN, status_text="已中断")
 
-            result = self._parse_by_platform(platform)
+            # ---- 1) 页面级状态：商品是否已下架/失效 ----
+            page_status, page_text = self._detect_page_status()
+            if page_status != STATUS_OK:
+                print(f"[BrowserEngine] 页面状态异常: {page_status} / {page_text}")
+                return FetchResult(name=self._safe_name(platform), status=page_status,
+                                   status_text=page_text)
 
-            # 解析不到价格时再等 2 秒重试一次：价格区常为异步渲染，首屏可能还没填充
-            if result[1] <= 0 and not abort():
+            # ---- 2) 规格锁定：选中指定版本/套餐 ----
+            sku_text = ""
+            if sku_spec:
+                applied, sku_text, message = self._apply_sku_spec(sku_spec)
+                if not applied:
+                    print(f"[BrowserEngine] 规格锁定失败: {message}；当前选中={sku_text!r}")
+                    return FetchResult(name=self._safe_name(platform),
+                                       status=STATUS_SKU_MISMATCH,
+                                       status_text=message, sku_text=sku_text)
+                # 选完规格后价格与库存会异步刷新
+                if not self._sleep(1.5, abort):
+                    return FetchResult(status=STATUS_UNKNOWN, status_text="已中断")
+
+            # ---- 3) 选中规格是否可购买 ----
+            stock_status, stock_text = self._detect_stock_status()
+            if stock_status != STATUS_OK:
+                print(f"[BrowserEngine] 库存状态: {stock_status} / {stock_text}")
+                return FetchResult(name=self._safe_name(platform), status=stock_status,
+                                   status_text=stock_text, sku_text=sku_text)
+
+            # ---- 4) 解析价格 ----
+            name, price, original_price = self._parse_by_platform(platform)
+
+            # 解析不到价格时再等 2 秒重试一次：价格区常为异步渲染
+            if price <= 0 and not abort():
                 if self._sleep(2.0, abort):
                     print("[BrowserEngine] 首次解析未取到价格，重试一次")
-                    result = self._parse_by_platform(platform)
+                    name2, price, original_price = self._parse_by_platform(platform)
+                    name = name or name2
 
-            return result
+            if price <= 0:
+                return FetchResult(name=name, status=STATUS_UNKNOWN,
+                                   status_text="未能解析到价格", sku_text=sku_text)
+
+            # ---- 5) 价格是否为"最低价起"这种区间价 ----
+            if self._detect_price_range(platform):
+                print("[BrowserEngine] 检测到页面显示的是区间价（最低价起），价格不可信")
+                return FetchResult(name=name, price=price, original_price=original_price,
+                                   status=STATUS_PRICE_RANGE,
+                                   status_text="页面显示为最低价起，需锁定具体规格",
+                                   sku_text=sku_text)
+
+            return FetchResult(name=name, price=price, original_price=original_price,
+                               status=STATUS_OK, sku_text=sku_text)
         except Exception as e:
             print(f"[BrowserEngine] 抓取商品信息失败: {e}")
             self._reset_if_dead()
-            return ("", 0.0, 0.0)
+            return FetchResult(status=STATUS_UNKNOWN, status_text=f"抓取异常: {str(e)[:80]}")
+
+    # ==================== 页面状态 / 库存 / 规格 ====================
+
+    # 下架类关键词（只认明确的失效文案，避免把推荐位里的"已下架"误判）
+    DELISTED_KEYWORDS = (
+        "宝贝不存在", "商品不存在", "您查看的宝贝", "该宝贝已删除",
+        "商品已失效", "该商品已下架", "商品已下架", "页面找不到",
+        "很抱歉，您查看的宝贝", "该商品已删除",
+    )
+
+    # 购买按钮上的无货文案
+    NO_STOCK_BUTTON_WORDS = (
+        "无货", "售罄", "缺货", "已抢光", "补货中", "到货通知", "已售完", "暂时缺货",
+    )
+
+    def _safe_name(self, platform: str) -> str:
+        """尽力取一个商品名（状态异常时也要能显示是哪件商品）"""
+        try:
+            name = self._get_generic_name(platform) if platform in ("pdd", "douyin") else ""
+            if not name and platform in ("taobao", "tmall"):
+                name = self._get_taobao_name()
+            elif not name and platform == "jd":
+                name = self._get_jd_name()
+            if not name:
+                name = self._extract_name_from_title()
+            return name or ""
+        except Exception:
+            return ""
+
+    def _detect_page_status(self) -> Tuple[str, str]:
+        """
+        判断页面本身是否有效（下架 / 失效）
+
+        只检查标题与明确的失效文案，避免把页面其它区域的文字误判成下架。
+        """
+        try:
+            info = self.driver.execute_script(r"""
+                var title = document.title || '';
+                var body = document.body ? (document.body.innerText || '') : '';
+                return {title: title, head: body.slice(0, 1500)};
+            """)
+        except Exception:
+            return (STATUS_OK, "")
+
+        title = (info or {}).get("title", "") or ""
+        head = (info or {}).get("head", "") or ""
+        for keyword in self.DELISTED_KEYWORDS:
+            if keyword in title or keyword in head:
+                return (STATUS_DELISTED, keyword)
+        return (STATUS_OK, "")
+
+    def _detect_stock_status(self) -> Tuple[str, str]:
+        """
+        判断当前选中规格是否可购买
+
+        依据：购买按钮的文案与禁用状态、页面上明确的缺货文案。
+        返回 (status, 说明文字)
+        """
+        try:
+            info = self.driver.execute_script(r"""
+                function norm(s){return (s||'').replace(/\s/g,'');}
+                var noStockWords = ['无货','售罄','缺货','已抢光','补货中','到货通知','已售完','暂时缺货','该地区无货','无法购买'];
+                var buyWords = ['立即购买','加入购物车','马上抢','领券购买','立即抢购','立即下单','去购买','立即订购','购买','抢购'];
+                var out = {found:false, disabled:false, text:'', noStockText:''};
+                var nodes = document.querySelectorAll('button,a,div,span');
+                var limit = Math.min(nodes.length, 4000);
+                for (var i=0;i<limit;i++){
+                    var el = nodes[i];
+                    var t = norm(el.innerText);
+                    if (!t || t.length > 14) continue;
+                    if (!el.offsetParent) continue;
+
+                    // 先看是否本身就是无货文案（如按钮文字直接变成"已售罄"）
+                    var hitNoStock = '';
+                    for (var k=0;k<noStockWords.length;k++){
+                        if (t.indexOf(noStockWords[k])>=0) { hitNoStock = t; break; }
+                    }
+                    if (hitNoStock) { out.noStockText = hitNoStock; break; }
+
+                    // 再看是否是购买按钮
+                    var isBuy = false;
+                    for (var b=0;b<buyWords.length;b++){ if (t.indexOf(buyWords[b])>=0){isBuy=true;break;} }
+                    if (!isBuy) continue;
+
+                    var dis = el.disabled === true ||
+                              (el.getAttribute && el.getAttribute('aria-disabled')==='true') ||
+                              /disabled|gray|unable/i.test((el.className||'').toString());
+                    out.found = true;
+                    out.disabled = out.disabled || dis;
+                    if (!out.text) out.text = t;
+                }
+                // 页面显式缺货文案
+                if (!out.noStockText) {
+                    var body = norm(document.body ? document.body.innerText : '').slice(0, 6000);
+                    var phrases = ['该套餐暂时缺货','此规格暂时缺货','该规格暂时缺货','该商品暂时缺货','所选规格无货','该地区暂时无货'];
+                    for (var p=0;p<phrases.length;p++){ if (body.indexOf(phrases[p])>=0){ out.noStockText = phrases[p]; break; } }
+                }
+                return out;
+            """)
+        except Exception as e:
+            print(f"[BrowserEngine] 库存检测脚本失败: {e}")
+            return (STATUS_OK, "")
+
+        info = info or {}
+        no_stock_text = info.get("noStockText") or ""
+        if no_stock_text:
+            return (STATUS_NO_STOCK, no_stock_text)
+        if info.get("found") and info.get("disabled"):
+            return (STATUS_NO_STOCK, info.get("text") or "购买按钮不可用")
+        return (STATUS_OK, "")
+
+    def _detect_price_range(self, platform: str) -> bool:
+        """
+        判断页面价格是否为"最低价起"的区间价
+
+        这类价格是"全商品最低 SKU 价"，不是你要的规格的价格，
+        一旦采信就会把别的套餐价格记下来（本次要修的核心问题）。
+        """
+        try:
+            texts = self.driver.execute_script(r"""
+                var out = [];
+                var nodes = document.querySelectorAll('[class*="price"],[class*="Price"]');
+                var limit = Math.min(nodes.length, 300);
+                for (var i=0;i<limit;i++){
+                    var el = nodes[i];
+                    if (el.children.length > 6) continue;
+                    var t = (el.innerText||'').replace(/\s/g,'');
+                    if (!t || t.length > 18) continue;
+                    if (/\d/.test(t)) out.push(t);
+                }
+                return out;
+            """)
+        except Exception:
+            return False
+
+        for text in (texts or []):
+            # "¥9198起" / "9198-11910" / "9198~11910"
+            if "起" in text and any(ch.isdigit() for ch in text):
+                return True
+            if "-" in text or "~" in text:
+                numbers = [seg for seg in text.replace("¥", "").replace("￥", "").split("-") if seg.strip().isdigit()]
+                if len(numbers) >= 2:
+                    return True
+        return False
+
+    def _apply_sku_spec(self, sku_spec) -> Tuple[bool, str, str]:
+        """
+        按记录的规格依次选中页面上的选项，并校验是否真的生效
+
+        返回 (是否成功, 实际选中的规格文本, 失败说明)
+        """
+        if not sku_spec:
+            return (True, "", "")
+
+        applied = []
+        failed = []
+        for item in sku_spec:
+            option = str(item).split("=", 1)[-1].strip()
+            if not option:
+                continue
+            if self._click_sku_option(option):
+                applied.append(str(item))
+            else:
+                failed.append(option)
+
+        # 点完规格后页面会异步重渲染，读取"当前选中"要重试几次，
+        # 否则会在过渡期间读到空列表，误判为"选中未生效"
+        selected = []
+        for _ in range(4):
+            self._sleep(0.5, lambda: False)
+            selected = self._read_selected_sku()
+            if applied and all(
+                any(self._norm_text(item.split("=", 1)[-1]) in self._norm_text(sel) for sel in selected)
+                for item in applied
+            ):
+                break
+
+        selected_text = " / ".join(selected)
+        # 校验：点过的规格必须出现在"当前选中"列表里（忽略空格差异）
+        missing = []
+        for item in applied:
+            option = self._norm_text(item.split("=", 1)[-1])
+            if not any(option in self._norm_text(sel) for sel in selected):
+                missing.append(item.split("=", 1)[-1].strip())
+
+        if failed or missing:
+            reasons = []
+            if failed:
+                reasons.append("找不到规格：" + "、".join(failed))
+            if missing:
+                reasons.append("选中未生效：" + "、".join(missing))
+            return (False, selected_text, "；".join(reasons))
+        return (True, selected_text, "")
+
+    @staticmethod
+    def _norm_text(text: str) -> str:
+        """去掉所有空白字符，便于规格文本比对（页面文案里空格不固定）"""
+        return "".join(str(text or "").split())
+
+    def _click_sku_option(self, option_text: str) -> bool:
+        """
+        点击与给定文本一致的规格选项
+
+        真实页面结构（淘宝已验证）：
+          div.skuItem--哈希 > div.skuItemClipX--哈希 > div.skuValueWrap--哈希
+            > div.content--哈希 > div.valueItem--哈希(选中时追加 isSelected--哈希)
+              > span.valueItemText--哈希
+        所以：限定在 sku 容器内匹配文字，并优先点击 valueItem 这一层。
+        """
+        try:
+            return bool(self.driver.execute_script(r"""
+                var want = WANT_TEXT.replace(/\s/g,'');
+                function norm(s){return (s||'').replace(/\s/g,'');}
+                function inSku(el){
+                    var p = el;
+                    for (var k=0;k<8 && p;k++){
+                        var cls = (p.className||'').toString().toLowerCase();
+                        if (cls.indexOf('sku') >= 0) return true;
+                        p = p.parentElement;
+                    }
+                    return false;
+                }
+                var nodes = document.querySelectorAll(
+                    'div[class*="valueItem"], span[class*="valueItemText"],' +
+                    'div[class*="skuItem"], span[class*="sku-item"],' +
+                    'div[class*="sku"], span[class*="sku"],' +
+                    'li, button, a, label, [role="radio"], [role="option"]'
+                );
+                var limit = Math.min(nodes.length, 6000);
+
+                // 两阶段匹配：先找文字完全一致的，再允许"短后缀"（如角标"多人加购"）。
+                // 只做前缀匹配会先命中分组容器这类"文字以选项开头"的大元素，点了没反应。
+                function pick(allowPrefix){
+                    var best = null, bestExtra = 99;
+                    for (var i=0;i<limit;i++){
+                        var el = nodes[i];
+                        if (el.getClientRects().length === 0) continue;
+                        if (el.children.length > 3) continue;
+                        if (!inSku(el)) continue;
+                        var text = norm(el.innerText);
+                        if (!text) continue;
+                        if (text === want) return el;
+                        if (allowPrefix && text.indexOf(want) === 0){
+                            var extra = text.length - want.length;
+                            if (extra <= 8 && extra < bestExtra){ best = el; bestExtra = extra; }
+                        }
+                    }
+                    return best;
+                }
+
+                var hit = pick(false) || pick(true);
+                if (!hit) return false;
+
+                // 向上找 valueItem 这一层再点，命中率更高
+                var target = hit;
+                var p = hit;
+                for (var d=0; d<4 && p; d++){
+                    var cls = (p.className||'').toString();
+                    if (cls.indexOf('valueItem') >= 0) { target = p; break; }
+                    p = p.parentElement;
+                }
+                try { target.scrollIntoView({block:'center'}); } catch(e) {}
+                try { target.click(); } catch(e) {}
+                return true;
+            """.replace("WANT_TEXT", _js_string(option_text))))
+        except Exception as e:
+            print(f"[BrowserEngine] 点击规格失败: {e}")
+            return False
+
+    def _read_selected_sku(self) -> list:
+        """
+        读取页面上当前选中的规格，返回 ["版本类型=日版", "套餐=单机标配"] 形式
+
+        实测淘宝的选中态是 isSelected--哈希（大写 S），
+        之前只匹配小写 selected 因此读不到任何规格。
+        """
+        try:
+            texts = self.driver.execute_script(r"""
+                function norm(s){return (s||'').replace(/\s+/g,' ').trim();}
+                function groupTitle(el){
+                    var p = el;
+                    for (var d=0; d<8 && p; d++){
+                        var cls = (p.className||'').toString();
+                        if (/skuItem--/.test(cls)){
+                            // ① 优先找显式的标题元素（如 class 含 title）
+                            var tEl = p.querySelector('[class*="title"], [class*="Title"]');
+                            if (tEl){
+                                var tt = norm(tEl.innerText);
+                                if (tt && tt.length <= 8) return tt;
+                            }
+                            // ② 退而取规格区首行（实测淘宝首行就是"版本类型"这类组名）
+                            var clip = p.querySelector('[class*="skuItemClipX"]') || p;
+                            var first = norm((clip.innerText || '').split('\n')[0]);
+                            if (first && first.length <= 8) return first;
+                            return '';
+                        }
+                        p = p.parentElement;
+                    }
+                    return '';
+                }
+                var out = [];
+                var nodes = document.querySelectorAll(
+                    '[class*="isSelected"], [class*="selected"], [class*="Selected"],' +
+                    '[aria-checked="true"], [aria-selected="true"]'
+                );
+                var limit = Math.min(nodes.length, 300);
+                for (var i=0;i<limit;i++){
+                    var el = nodes[i];
+                    // 用 getClientRects 判断可见性：规格面板常用 transform/scroll 容器，
+                    // offsetParent 在某些情况下为 null，会把正常元素误过滤掉
+                    if (el.getClientRects().length === 0) continue;
+                    var cls = (el.className||'').toString();
+                    // 只认规格项：valueItem 或位于 sku 容器内
+                    if (cls.indexOf('valueItem') < 0 && !/sku/i.test(cls)
+                        && !el.getAttribute('aria-checked') && !el.getAttribute('aria-selected')) continue;
+
+                    var span = el.querySelector('[class*="valueItemText"]');
+                    var text = norm(span ? span.innerText : el.innerText);
+                    if (!text || text.length > 30) continue;
+
+                    var group = groupTitle(el);
+                    var item = group ? (group + '=' + text) : text;
+                    if (out.indexOf(item) < 0) out.push(item);
+                }
+                return out;
+            """)
+        except Exception as e:
+            print(f"[BrowserEngine] 读取规格失败: {e}")
+            return []
+        return list(texts or [])
+
+    def record_current_sku(self, url: str, platform: str) -> list:
+        """
+        打开商品页，读取用户当前手动选中的规格
+
+        用于「记录当前规格」功能：用户在浏览器里选好想要的版本/套餐后，
+        由主窗口调用本方法把选中项抓下来存进商品配置。
+        """
+        if not self.driver:
+            if not self.start_browser():
+                return []
+        self._ensure_platform_cookie(platform)
+        try:
+            self.driver.get(url)
+            self._wait_page_ready(10)
+            self._sleep(2.0, lambda: False)
+            self._try_close_popups()
+            return self._read_selected_sku()
+        except Exception as e:
+            print(f"[BrowserEngine] 读取当前规格失败: {e}")
+            return []
 
     def _parse_by_platform(self, platform: str) -> Tuple[str, float, float]:
         """按平台分派到对应解析器"""

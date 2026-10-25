@@ -8,21 +8,34 @@ from typing import List, Optional
 
 from paths import DATA_DIR
 from platforms import detect_platform, display_name
+import status as st
 
 
 class PriceRecord:
-    """单条价格记录"""
+    """单条价格记录（status 非 ok 时 price 为 0，仅记录状态）"""
 
-    def __init__(self, price: float, original_price: float = 0.0, timestamp: str = ""):
+    def __init__(self, price: float, original_price: float = 0.0,
+                 timestamp: str = "", status: str = st.STATUS_OK,
+                 status_text: str = "", sku_text: str = ""):
         self.price = price
         self.original_price = original_price
         self.timestamp = timestamp or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self.status = status or st.STATUS_OK
+        self.status_text = status_text
+        self.sku_text = sku_text
+
+    @property
+    def status_display(self) -> str:
+        return st.display(self.status)
 
     def to_dict(self) -> dict:
         return {
             "price": self.price,
             "original_price": self.original_price,
             "timestamp": self.timestamp,
+            "status": self.status,
+            "status_text": self.status_text,
+            "sku_text": self.sku_text,
         }
 
     @classmethod
@@ -31,6 +44,9 @@ class PriceRecord:
             price=data.get("price", 0.0),
             original_price=data.get("original_price", 0.0),
             timestamp=data.get("timestamp", ""),
+            status=data.get("status", st.STATUS_OK),
+            status_text=data.get("status_text", ""),
+            sku_text=data.get("sku_text", ""),
         )
 
 
@@ -61,6 +77,17 @@ class Product:
         self.last_refresh: str = ""
         self.price_history: List[PriceRecord] = []
 
+        # ---- 库存/上下架状态（与价格分离）----
+        self.last_status: str = st.STATUS_OK        # 最近一次抓取的状态
+        self.last_status_text: str = ""             # 页面原文，便于排查
+        self.last_status_time: str = ""             # 状态时间
+        self.last_valid_price: float = 0.0          # 最近一次可信价格
+        self.last_valid_time: str = ""              # 最近一次可信价格的时间
+
+        # ---- 规格锁定：要监控的具体版本/套餐 ----
+        self.sku_spec: List[str] = []               # 例如 ["版本类型=中国大陆", "套餐=单机标配"]
+        self.sku_recorded_at: str = ""              # 规格采集时间
+
     def _detect_platform(self, url: str) -> str:
         """按域名识别平台（规则集中在 platforms.py）"""
         return detect_platform(url)
@@ -68,16 +95,60 @@ class Product:
     def platform_display_name(self) -> str:
         return display_name(self.platform)
 
-    def add_price_record(self, price: float, original_price: float = 0.0):
-        self.current_price = price
-        self.original_price = original_price
-        self.last_refresh = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        self.price_history.append(PriceRecord(price, original_price))
+    def status_display(self) -> str:
+        """当前状态的中文显示（无货/已下架等）"""
+        return st.display(self.last_status)
+
+    def is_available(self) -> bool:
+        """当前是否处于可购买状态"""
+        return self.last_status == st.STATUS_OK
+
+    def has_sku_lock(self) -> bool:
+        return bool(self.sku_spec)
+
+    def sku_display(self) -> str:
+        """规格的人类可读文本"""
+        return " / ".join(self.sku_spec) if self.sku_spec else "(未锁定规格)"
+
+    def add_price_record(self, price: float, original_price: float = 0.0,
+                         status: str = st.STATUS_OK, status_text: str = "",
+                         sku_text: str = "") -> None:
+        """
+        写入一条抓取记录
+
+        注意：只有 status=ok 时才更新当前价格；其他状态（无货/下架/规格失效）
+        只记录状态、不覆盖价格，避免把"没货"当成"降价"写进历史。
+        last_refresh 在每次抓取后都会更新（否则无货商品会被调度器反复重试）。
+        """
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self.last_refresh = now
+        self.last_status = status or st.STATUS_UNKNOWN
+        self.last_status_text = status_text or ""
+        self.last_status_time = now
+
+        if st.is_price_trusted(self.last_status) and price > 0:
+            self.current_price = price
+            self.original_price = original_price
+            self.last_valid_price = price
+            self.last_valid_time = now
+
+        self.price_history.append(
+            PriceRecord(
+                price=price if st.is_price_trusted(self.last_status) else 0.0,
+                original_price=original_price if st.is_price_trusted(self.last_status) else 0.0,
+                status=self.last_status,
+                status_text=self.last_status_text,
+                sku_text=sku_text,
+            )
+        )
         if len(self.price_history) > 500:
             self.price_history = self.price_history[-500:]
 
     def is_price_reached(self) -> bool:
+        """是否达到预期价（仅在价格可信、且在售时判断）"""
         if self.expected_price <= 0 or self.current_price <= 0:
+            return False
+        if self.last_status != st.STATUS_OK:
             return False
         return self.current_price <= self.expected_price
 
@@ -167,6 +238,13 @@ class Product:
             "current_price": self.current_price,
             "original_price": self.original_price,
             "last_refresh": self.last_refresh,
+            "last_status": self.last_status,
+            "last_status_text": self.last_status_text,
+            "last_status_time": self.last_status_time,
+            "last_valid_price": self.last_valid_price,
+            "last_valid_time": self.last_valid_time,
+            "sku_spec": list(self.sku_spec),
+            "sku_recorded_at": self.sku_recorded_at,
             "price_history": [r.to_dict() for r in self.price_history],
         }
 
@@ -185,6 +263,14 @@ class Product:
         p.current_price = data.get("current_price", 0.0)
         p.original_price = data.get("original_price", 0.0)
         p.last_refresh = data.get("last_refresh", "")
+        # 旧数据没有以下字段，给默认值保证兼容
+        p.last_status = data.get("last_status", st.STATUS_OK)
+        p.last_status_text = data.get("last_status_text", "")
+        p.last_status_time = data.get("last_status_time", "")
+        p.last_valid_price = data.get("last_valid_price", p.current_price)
+        p.last_valid_time = data.get("last_valid_time", data.get("last_refresh", ""))
+        p.sku_spec = list(data.get("sku_spec", []) or [])
+        p.sku_recorded_at = data.get("sku_recorded_at", "")
         p.price_history = [
             PriceRecord.from_dict(r) for r in data.get("price_history", [])
         ]

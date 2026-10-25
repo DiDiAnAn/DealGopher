@@ -19,6 +19,7 @@ from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QThread
 from PyQt5.QtGui import QFont, QColor
 
 from models import Product, DataStore
+import status as st
 from browser_engine import BrowserEngine
 from browser_detector import detect_browsers
 from browser_dialog import ask_browser
@@ -66,7 +67,7 @@ logger.setLevel(logging.DEBUG)
 
 class FetchWorker(QThread):
     """后台抓取线程"""
-    finished = pyqtSignal(int, str, float, float)
+    finished = pyqtSignal(int, object)   # (索引, FetchResult)
     error = pyqtSignal(int, str)
 
     def __init__(self, engine: BrowserEngine, product: Product, index: int):
@@ -82,21 +83,50 @@ class FetchWorker(QThread):
 
     def run(self):
         try:
-            name, price, orig_price = self.engine.fetch_product_info(
+            result = self.engine.fetch_product_info(
                 self.product.url, self.product.platform,
                 should_abort=self._abort.is_set,
+                sku_spec=self.product.sku_spec,
             )
             if self._abort.is_set():
                 # 已请求中断，结果作废，不再回传
                 logger.warning(f"[抓取队列] 商品{self.index + 1} 抓取已被中断")
                 return
-            if price > 0:
-                self.finished.emit(self.index, name, price, orig_price)
-            else:
-                self.error.emit(self.index, "未能获取到价格，可能需要重新登录")
+            self.finished.emit(self.index, result)
         except Exception as e:
             if not self._abort.is_set():
                 self.error.emit(self.index, str(e))
+
+
+class SkuRecordWorker(QThread):
+    """读取用户在浏览器里手动选中的规格（用于「记录当前规格」）"""
+    done = pyqtSignal(int, list, str)   # (索引, 规格列表, 错误信息)
+
+    def __init__(self, engine: BrowserEngine, product: Product, index: int, gate):
+        super().__init__()
+        self.engine = engine
+        self.product = product
+        self.index = index
+        self.gate = gate   # threading.Event：主窗口点「确定」后放行
+
+    def run(self):
+        try:
+            # 先打开页面，等主窗口提示用户去选规格
+            if not self.engine.driver:
+                self.engine.start_browser()
+            self.engine.driver.get(self.product.url)
+            self.engine._wait_page_ready(10)
+            self.engine._sleep(2.0, lambda: False)
+            self.engine._try_close_popups()
+
+            # 等用户在界面上点「确定」
+            while not self.gate.wait(0.3):
+                pass
+
+            specs = self.engine._read_selected_sku()
+            self.done.emit(self.index, specs, "")
+        except Exception as e:
+            self.done.emit(self.index, [], str(e))
 
 
 class MainWindow(QMainWindow):
@@ -137,6 +167,9 @@ class MainWindow(QMainWindow):
 
         self._alert_queue: List[Product] = []
         self._showing_alert = False
+        # 补货提醒队列（静默弹窗，不播声音）
+        self._restock_queue: List[Product] = []
+        self._restock_showing = False
         # 正在关闭：所有定时器/队列回调在此之后直接返回，避免窗口销毁过程中被回调访问
         self._closing = False
 
@@ -661,21 +694,33 @@ class MainWindow(QMainWindow):
             name = product.name if product.name else "(未获取)"
             if len(name) > 30:
                 name = name[:30] + "..."
-            self.table.setItem(i, 1, QTableWidgetItem(name))
+            name_item = QTableWidgetItem(name)
+            if product.has_sku_lock():
+                name_item.setToolTip("已锁定规格：" + product.sku_display())
+            self.table.setItem(i, 1, name_item)
 
             platform_item = QTableWidgetItem(product.platform_display_name())
             platform_item.setTextAlignment(Qt.AlignCenter)
             self.table.setItem(i, 2, platform_item)
 
-            if product.current_price > 0:
+            # ---- 当前价格：无货/下架时显示 --，但保留上次有效价作为提示 ----
+            available = product.last_status == st.STATUS_OK
+            if available and product.current_price > 0:
                 price_text = f"¥{product.current_price:.2f}"
+            elif product.last_valid_price > 0:
+                price_text = "--"
             else:
                 price_text = "--"
             price_item = QTableWidgetItem(price_text)
             price_item.setTextAlignment(Qt.AlignCenter)
-            if product.is_price_reached():
+            if available and product.last_valid_price > 0:
+                price_item.setToolTip(f"上次有效价 ¥{product.last_valid_price:.2f}"
+                                      f"（{product.last_valid_time or '未知时间'}）")
+            if available and product.is_price_reached():
                 price_item.setForeground(QColor("#e74c3c"))
                 price_item.setFont(QFont("Microsoft YaHei", 10, QFont.Bold))
+            elif not available and product.last_valid_price > 0:
+                price_item.setForeground(QColor("#bdc3c7"))
             self.table.setItem(i, 3, price_item)
 
             if product.expected_price > 0:
@@ -701,19 +746,31 @@ class MainWindow(QMainWindow):
             setting_item.setTextAlignment(Qt.AlignCenter)
             self.table.setItem(i, 7, setting_item)
 
-            if product.is_price_reached():
-                status_text = "已达标"
-                status_color = QColor("#e74c3c")
+            # ---- 状态列：优先显示库存/上下架状态 ----
+            if product.last_status == st.STATUS_NO_STOCK:
+                status_text, status_color = "无货", QColor("#e67e22")
+            elif product.last_status == st.STATUS_DELISTED:
+                status_text, status_color = "已下架", QColor("#7f8c8d")
+            elif product.last_status == st.STATUS_SKU_MISMATCH:
+                status_text, status_color = "规格失效", QColor("#c0392b")
+            elif product.last_status == st.STATUS_PRICE_RANGE:
+                status_text, status_color = "价格区间", QColor("#8e44ad")
+            elif product.last_status == st.STATUS_UNKNOWN and not product.last_valid_price:
+                status_text, status_color = "抓取异常", QColor("#95a5a6")
+            elif product.is_price_reached():
+                status_text, status_color = "已达标", QColor("#e74c3c")
             elif product.current_price > 0:
-                status_text = "监控中"
-                status_color = QColor("#27ae60")
+                status_text, status_color = "监控中", QColor("#27ae60")
             else:
-                status_text = "待刷新"
-                status_color = QColor("#95a5a6")
+                status_text, status_color = "待刷新", QColor("#95a5a6")
+
             status_item = QTableWidgetItem(status_text)
             status_item.setForeground(status_color)
             status_item.setTextAlignment(Qt.AlignCenter)
             status_item.setFont(QFont("Microsoft YaHei", 9, QFont.Bold))
+            detail = product.last_status_text or ""
+            if detail:
+                status_item.setToolTip(detail)
             self.table.setItem(i, 8, status_item)
 
     def _update_countdown(self):
@@ -768,6 +825,19 @@ class MainWindow(QMainWindow):
         open_action = QAction("打开商品链接", self)
         open_action.triggered.connect(lambda: self._open_product_url(row))
         menu.addAction(open_action)
+
+        menu.addSeparator()
+
+        # 规格锁定：解决"选了套餐但抓到最低价"的问题
+        product = self.products[row]
+        sku_action = QAction("记录当前规格（锁定版本/套餐）", self)
+        sku_action.triggered.connect(lambda: self._record_sku(row))
+        menu.addAction(sku_action)
+
+        if product.has_sku_lock():
+            clear_action = QAction(f"清除规格锁定（当前：{product.sku_display()}）", self)
+            clear_action.triggered.connect(lambda: self._clear_sku(row))
+            menu.addAction(clear_action)
 
         menu.addSeparator()
 
@@ -868,6 +938,95 @@ class MainWindow(QMainWindow):
             from PyQt5.QtCore import QUrl
             from PyQt5.QtGui import QDesktopServices
             QDesktopServices.openUrl(QUrl(self.products[row].url))
+
+    # ==================== 规格锁定 ====================
+
+    def _record_sku(self, row: int):
+        """
+        记录当前选中的规格
+
+        流程：后台打开商品页 → 主窗口提示用户手动选规格 → 点「确定」→ 后台读取选中项
+        """
+        if row < 0 or row >= len(self.products):
+            return
+        if self._current_worker and self._current_worker.isRunning():
+            QMessageBox.information(self, "提示", "正在抓取中，请等本次抓取完成后再记录规格。")
+            return
+
+        product = self.products[row]
+        gate = threading.Event()
+        self._sku_record_ok = False
+
+        worker = SkuRecordWorker(self.engine, product, row, gate)
+        worker.done.connect(self._on_sku_recorded)
+        worker.start()
+        self._sku_worker = worker
+
+        reply = QMessageBox.information(
+            self, "记录当前规格",
+            "浏览器已打开该商品页面。\n\n"
+            "① 在弹出的浏览器里选好你要监控的「版本 / 套餐 / 颜色」\n"
+            "② 选好后回到这个窗口点「确定」\n\n"
+            "程序会记下这次选中的规格，之后每次抓取都只抓这一款的价格。",
+            QMessageBox.Ok | QMessageBox.Cancel,
+        )
+        self._sku_record_ok = (reply == QMessageBox.Ok)
+        gate.set()
+
+    def _on_sku_recorded(self, index: int, specs: list, error: str):
+        """「记录当前规格」完成回调"""
+        if not getattr(self, "_sku_record_ok", False):
+            self.status_label.setText("已取消记录规格")
+            return
+        if error:
+            QMessageBox.warning(self, "记录失败", f"读取规格时出错：{error}")
+            return
+        if not specs:
+            QMessageBox.warning(
+                self, "没读到规格",
+                "没有读到选中的规格。\n\n"
+                "常见原因：\n"
+                "· 还没有在浏览器里点选规格\n"
+                "· 该页面规格区域的页面结构比较特殊\n\n"
+                "可以再试一次，或先不锁定规格（此时抓到的可能是最低价）。",
+            )
+            return
+        if index >= len(self.products):
+            return
+        product = self.products[index]
+        product.sku_spec = list(specs)
+        product.sku_recorded_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self.store.save_products(self.products)
+        self._refresh_table()
+        logger.info(f"[规格锁定] 商品{index + 1} 已锁定规格: {' / '.join(specs)}")
+        self.status_label.setText("已锁定规格：" + " / ".join(specs))
+        QMessageBox.information(
+            self, "记录成功",
+            "已锁定规格：\n\n" + " / ".join(specs) +
+            "\n\n之后只抓这一款的价格；如果这一款无货，会显示「无货」而不是抓最低价。",
+        )
+
+    def _clear_sku(self, row: int):
+        """清除规格锁定"""
+        if row < 0 or row >= len(self.products):
+            return
+        product = self.products[row]
+        if not product.has_sku_lock():
+            return
+        reply = QMessageBox.question(
+            self, "清除规格锁定",
+            f"确定清除「{product.name or product.url[:30]}」的规格锁定吗？\n\n"
+            "清除后将按页面默认显示抓取，可能抓到的是最低价。",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        product.sku_spec = []
+        product.sku_recorded_at = ""
+        self.store.save_products(self.products)
+        self._refresh_table()
+        logger.info(f"[规格锁定] 商品{row + 1} 已清除规格锁定")
+        self.status_label.setText("已清除规格锁定")
 
     # ==================== 提示音设置 ====================
 
@@ -1040,7 +1199,7 @@ class MainWindow(QMainWindow):
         worker = FetchWorker(self.engine, product, index)
 
         # 关键：使用 lambda 包裹 index，防止闭包陷阱
-        worker.finished.connect(lambda idx, name, price, orig: self._on_fetch_done(idx, name, price, orig))
+        worker.finished.connect(lambda idx, res: self._on_fetch_done(idx, res))
         worker.error.connect(lambda idx, msg: self._on_fetch_error(idx, msg))
 
         self._current_worker = worker
@@ -1062,38 +1221,50 @@ class MainWindow(QMainWindow):
             self._fetch_queue.append(index)
         self._process_fetch_queue()
 
-    def _on_fetch_done(self, index: int, name: str, price: float, orig_price: float):
-        self._reset_worker_state()  # <--- 新增这一行
-
-        logger.info(f"[抓取完成] 商品{index+1}: name={name[:20] if name else '无'}, "
-                     f"price={price}, orig_price={orig_price}")
+    def _on_fetch_done(self, index: int, result):
+        """抓取完成回调：按状态决定是否采信价格、是否提醒"""
+        self._reset_worker_state()
 
         if index >= len(self.products):
             logger.warning(f"[抓取完成] 索引{index}超出范围")
             self._process_fetch_queue()
             return
+
         product = self.products[index]
+        previous_status = product.last_status
+        prev_name = product.name or product.url[:30]
 
-        if name:
-            product.name = name
+        logger.info(
+            f"[抓取完成] 商品{index + 1} [{prev_name[:20]}] "
+            f"status={result.status}({result.status_text or '-'}) "
+            f"price={result.price} original={result.original_price} "
+            f"sku={result.sku_text or '-'}"
+        )
 
-        if price > 0:
-            product.add_price_record(price, orig_price)
-            self.store.save_products(self.products)
-            self.status_label.setText(
-                f"{product.name[:20] if product.name else '商品'}... "
-                f"当前价格: ¥{price:.2f}"
-            )
-            logger.info(f"[抓取完成] 商品{index+1} [{product.name[:20]}] "
-                         f"价格已记录: ¥{price:.2f}, last_refresh更新为: {product.last_refresh}")
+        if result.name:
+            product.name = result.name
+
+        # 无论什么状态都落一条记录（价格字段对非 ok 状态无效）
+        product.add_price_record(
+            result.price, result.original_price,
+            status=result.status, status_text=result.status_text,
+            sku_text=result.sku_text,
+        )
+        self.store.save_products(self.products)
+
+        display_name = (product.name or "商品")[:20]
+        if result.status == st.STATUS_OK:
+            self.status_label.setText(f"{display_name}... 当前价格: ¥{result.price:.2f}")
+            logger.info(f"[价格记录] 商品{index + 1} [{display_name}] ¥{result.price:.2f}")
         else:
-            if name:
-                self.store.save_products(self.products)
+            status_text = st.display(result.status)
+            detail = result.status_text or ""
             self.status_label.setText(
-                f"{product.name[:20] if product.name else '商品'}... "
-                f"未能获取到价格，请检查登录状态"
+                f"{display_name}... {status_text}{('：' + detail) if detail else ''}"
             )
-            logger.warning(f"[抓取完成] 商品{index+1} [{product.name[:20]}] 未获取到价格")
+            logger.warning(
+                f"[状态变化] 商品{index + 1} [{display_name}] {status_text} {detail}"
+            )
 
         self._refresh_table()
 
@@ -1105,13 +1276,49 @@ class MainWindow(QMainWindow):
 
         self._update_records_table()
 
-        if product.is_price_reached():
-            logger.info(f"[价格达标] 商品{index+1} [{product.name[:20]}] "
-                         f"当前¥{price:.2f} <= 预期¥{product.expected_price:.2f}")
+        # 达标提醒：只有价格可信且在售时才判断
+        if result.status == st.STATUS_OK and product.is_price_reached():
+            logger.info(
+                f"[价格达标] 商品{index + 1} [{display_name}] "
+                f"当前¥{product.current_price:.2f} <= 预期¥{product.expected_price:.2f}"
+            )
             self._alert_queue.append(product)
             self._process_alert_queue()
 
+        # 补货提醒：上一次买不到，这一次能买了
+        if st.is_unavailable(previous_status) and result.status == st.STATUS_OK:
+            logger.info(f"[补货提醒] 商品{index + 1} [{display_name}] 已恢复可购买")
+            self._notify_restock(product)
+
         self._process_fetch_queue()
+
+    # ==================== 补货提醒（静默弹窗，不播声音） ====================
+
+    def _notify_restock(self, product: Product):
+        """补货只做静默弹窗：反复补货时不会因为播放提示音而吵闹"""
+        self._restock_queue.append(product)
+        if not self._restock_showing:
+            QTimer.singleShot(300, self._process_restock_queue)
+
+    def _process_restock_queue(self):
+        if self._closing or self._restock_showing or not self._restock_queue:
+            return
+        self._restock_showing = True
+        try:
+            lines = []
+            while self._restock_queue:
+                item = self._restock_queue.pop(0)
+                price = item.last_valid_price or item.current_price
+                price_text = f"¥{price:.2f}" if price > 0 else "价格未知"
+                lines.append(f"· {item.name or item.url[:40]}　当前 {price_text}")
+            QMessageBox.information(
+                self,
+                "补货提醒",
+                "以下商品已恢复可购买：\n\n" + "\n".join(lines) +
+                "\n\n（补货提醒只弹窗，不播放提示音）",
+            )
+        finally:
+            self._restock_showing = False
 
     def _on_fetch_error(self, index: int, error_msg: str):
         self._reset_worker_state()  # <--- 新增这一行
