@@ -402,15 +402,22 @@ class MainWindow(QMainWindow):
         left_layout.addWidget(table_label)
 
         self.table = QTableWidget()
+        # 列顺序：把「状态」提到前面，避免用户必须横向滚动才能看到有货/无货；
+        # 宽度按面板实际可用空间收紧，尽量不出现横向滚动条。
         self.table.setColumnCount(9)
         self.table.setHorizontalHeaderLabels([
-            "序号", "商品名称", "平台", "当前价格", "预期价格",
-            "上次刷新", "下次刷新倒计时", "刷新设置", "状态"
+            "序号", "商品名称", "平台", "状态", "当前价格", "预期价格",
+            "上次刷新", "下次刷新", "刷新设置"
         ])
         self.table.setFont(QFont("Microsoft YaHei", 9))
         self.table.horizontalHeader().setFont(QFont("Microsoft YaHei", 9, QFont.Bold))
+        # 商品名称列自适应拉伸，其它列固定宽度（可拖动调整）
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
-        self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.table.horizontalHeader().setStretchLastSection(False)
+        for _col, _width in ((0, 45), (2, 52), (3, 64), (4, 84), (5, 84),
+                             (6, 122), (7, 76), (8, 72)):
+            self.table.setColumnWidth(_col, _width)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SingleSelection)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
@@ -479,7 +486,10 @@ class MainWindow(QMainWindow):
         self.record_table.setFont(QFont("Microsoft YaHei", 9))
         self.record_table.horizontalHeader().setFont(QFont("Microsoft YaHei", 9, QFont.Bold))
         self.record_table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
-        self.record_table.horizontalHeader().setStretchLastSection(True)
+        self.record_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.record_table.horizontalHeader().setStretchLastSection(False)
+        for _col, _width in ((0, 40), (2, 108), (3, 62), (4, 70), (5, 70)):
+            self.record_table.setColumnWidth(_col, _width)
         self.record_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.record_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.record_table.setAlternatingRowColors(True)
@@ -503,7 +513,7 @@ class MainWindow(QMainWindow):
         right_layout.addWidget(self.right_tabs)
 
         splitter.addWidget(right_widget)
-        splitter.setSizes([650, 500])
+        splitter.setSizes([760, 440])
 
         main_layout.addWidget(splitter)
 
@@ -723,7 +733,7 @@ class MainWindow(QMainWindow):
                 price_item.setFont(QFont("Microsoft YaHei", 10, QFont.Bold))
             elif not available and product.last_valid_price > 0:
                 price_item.setForeground(QColor("#bdc3c7"))
-            self.table.setItem(i, 3, price_item)
+            self.table.setItem(i, 4, price_item)
 
             if product.expected_price > 0:
                 expected_text = f"¥{product.expected_price:.2f}"
@@ -732,21 +742,21 @@ class MainWindow(QMainWindow):
             expected_item = QTableWidgetItem(expected_text)
             expected_item.setTextAlignment(Qt.AlignCenter)
             expected_item.setForeground(QColor("#27ae60"))
-            self.table.setItem(i, 4, expected_item)
+            self.table.setItem(i, 5, expected_item)
 
             last_refresh = product.last_refresh if product.last_refresh else "--"
             refresh_item = QTableWidgetItem(last_refresh)
             refresh_item.setTextAlignment(Qt.AlignCenter)
-            self.table.setItem(i, 5, refresh_item)
+            self.table.setItem(i, 6, refresh_item)
 
             countdown_item = QTableWidgetItem("--")
             countdown_item.setTextAlignment(Qt.AlignCenter)
-            self.table.setItem(i, 6, countdown_item)
+            self.table.setItem(i, 7, countdown_item)
 
             setting_text = product.get_refresh_time_display()
             setting_item = QTableWidgetItem(setting_text)
             setting_item.setTextAlignment(Qt.AlignCenter)
-            self.table.setItem(i, 7, setting_item)
+            self.table.setItem(i, 8, setting_item)
 
             # ---- 状态列：优先显示库存/上下架状态 ----
             if product.last_status == st.STATUS_NO_STOCK:
@@ -773,7 +783,7 @@ class MainWindow(QMainWindow):
             detail = product.last_status_text or ""
             if detail:
                 status_item.setToolTip(detail)
-            self.table.setItem(i, 8, status_item)
+            self.table.setItem(i, 3, status_item)
 
     def _update_countdown(self):
         """更新倒计时列"""
@@ -791,7 +801,7 @@ class MainWindow(QMainWindow):
                     minutes, seconds = divmod(remainder, 60)
                     countdown_text = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
 
-            item = self.table.item(i, 6)
+            item = self.table.item(i, 7)
             if item:
                 item.setText(countdown_text)
 

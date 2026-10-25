@@ -4,7 +4,7 @@
 
 基于 PyQt5 + Selenium，自动定时抓取商品价格、绘制历史走势图、价格达标时弹窗与播放提示音，并把每次记录导出为可分析的 Excel 表格。
 
-> 作者：**安安** · 版本 1.7.1
+> 作者：**安安** · 版本 1.7.2
 > 仅供个人使用，未经授权不得分享或商用（详见文末）
 
 ---
@@ -118,7 +118,7 @@ price_monitor/
 
 ## 下载与安装
 
-- **普通用户**：到 [Releases](https://github.com/DiDiAnAn/DealGopher/releases/latest) 下载 `蹲价V1.7.1_win64.zip`，解压后双击 `蹲价V1.7.1.exe` 即可运行（`_internal` 文件夹必须与 exe 放在一起）。
+- **普通用户**：到 [Releases](https://github.com/DiDiAnAn/DealGopher/releases/latest) 下载 `蹲价V1.7.2_win64.zip`，解压后双击 `蹲价V1.7.2.exe` 即可运行（`_internal` 文件夹必须与 exe 放在一起）。
 - **开发者**：按下方「源码运行」从仓库拉取代码自行运行或打包。
 
 > 运行环境：Windows 10/11 64 位 + 已安装 Chrome 或 Edge。首次运行需在程序内登录一次购物平台。
