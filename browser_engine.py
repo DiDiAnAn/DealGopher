@@ -721,6 +721,32 @@ class BrowserEngine:
                     return True
         return False
 
+    def _wait_for_sku_ready(self, timeout: float = 8.0) -> bool:
+        """
+        等规格区渲染完成
+
+        淘宝等页面是前端异步渲染的，刚打开时规格区可能还不存在，
+        此时直接读/点会误判为"找不到规格"。这里轮询并配合滚动触发懒加载。
+        """
+        deadline = time.time() + timeout
+        probe = (
+            "return document.querySelectorAll("
+            "'[class*=\"sku\"],[class*=\"Sku\"],[class*=\"valueItem\"]').length;"
+        )
+        while time.time() < deadline:
+            try:
+                count = self.driver.execute_script(probe)
+                if count and int(count) > 0:
+                    return True
+            except Exception:
+                pass
+            try:
+                self.driver.execute_script("window.scrollTo(0, 420);")
+            except Exception:
+                pass
+            time.sleep(0.5)
+        return False
+
     def _apply_sku_spec(self, sku_spec) -> Tuple[bool, str, str]:
         """
         按记录的规格依次选中页面上的选项，并校验是否真的生效
@@ -730,11 +756,25 @@ class BrowserEngine:
         if not sku_spec:
             return (True, "", "")
 
+        # 规格区可能是懒加载的：先等它渲染出来，否则会误判为"找不到规格"
+        if not self._wait_for_sku_ready(8.0):
+            return (False, "", "页面规格区未加载完成")
+
+        # 先读一次当前选中状态：已经选中的规格不要再点。
+        # 实测淘宝上再次点击"已选中"的规格会折叠该分组，反而导致读不到选中项。
+        current = self._read_selected_sku()
+        current_norm = [self._norm_text(item) for item in current]
+
         applied = []
         failed = []
         for item in sku_spec:
             option = str(item).split("=", 1)[-1].strip()
             if not option:
+                continue
+            option_norm = self._norm_text(option)
+            if any(option_norm in sel for sel in current_norm):
+                # 已经是选中态，跳过点击
+                applied.append(str(item))
                 continue
             if self._click_sku_option(option):
                 applied.append(str(item))
@@ -942,22 +982,38 @@ class BrowserEngine:
         return ("", 0.0, 0.0)
 
     def _try_close_popups(self):
-        """尝试关闭页面上的弹窗/遮罩层"""
+        """
+        尝试关闭页面上的弹窗/遮罩层
+
+        注意：选择器必须限定在"弹窗容器内"，不能用裸的 [class*='close']。
+        实测淘宝页面里规格面板也有 class 含 close 的元素，宽泛匹配会把
+        规格面板一起点掉，导致后续读不到规格、抓不到价格。
+        """
         close_selectors = [
             ".baxia-dialog-close",
             ".J_Close",
-            "[class*='close']",
-            ".dialog-close",
-            ".modal-close",
+            "[class*='dialog'] [class*='close']",
+            "[class*='Dialog'] [class*='close']",
+            "[class*='modal'] [class*='close']",
+            "[class*='Modal'] [class*='close']",
+            "[class*='mask'] [class*='close']",
             "button[aria-label='Close']",
         ]
         for sel in close_selectors:
             try:
                 elements = self.driver.find_elements(By.CSS_SELECTOR, sel)
-                for el in elements:
-                    if el.is_displayed():
+                # 最多点 3 个，避免误伤；且只点尺寸很小的关闭按钮
+                for el in elements[:3]:
+                    try:
+                        if not el.is_displayed():
+                            continue
+                        rect = el.rect or {}
+                        if rect.get("width", 0) > 80 or rect.get("height", 0) > 80:
+                            continue
                         el.click()
-                        time.sleep(0.5)
+                        time.sleep(0.4)
+                    except Exception:
+                        continue
             except Exception:
                 continue
 
