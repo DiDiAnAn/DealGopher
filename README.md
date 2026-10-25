@@ -118,7 +118,7 @@ price_monitor/
 
 ## 下载与安装
 
-- **普通用户**：到 [Releases](https://github.com/DiDiAnAn/DealGopher/releases/latest) 下载 `蹲价V1.7.6_win64.zip`，解压后双击 `蹲价V1.7.6.exe` 即可运行（`_internal` 文件夹必须与 exe 放在一起）。
+- **普通用户**：到 [Releases](https://github.com/DiDiAnAn/PriceMonitor/releases/latest) 下载 `dunjia-v1.7.6-win64.zip`，解压后双击 `蹲价V1.7.6.exe` 即可运行（`_internal` 文件夹必须与 exe 放在一起）。
 - **开发者**：按下方「源码运行」从仓库拉取代码自行运行或打包。
 
 > 运行环境：Windows 10/11 64 位 + 已安装 Chrome 或 Edge。首次运行需在程序内登录一次购物平台。
