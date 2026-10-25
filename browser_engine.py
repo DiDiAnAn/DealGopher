@@ -282,7 +282,7 @@ class BrowserEngine:
                 return
             print(f"[BrowserEngine] 发现 {len(pids)} 个残留浏览器进程，正在清理")
             for pid in pids:
-                subprocess.run(["taskkill", "/PID", pid, "/F", "/T"],
+                subprocess.run(["taskkill", "/PID", pid, "/F"],
                                capture_output=True, timeout=10)
             time.sleep(1.0)
         except Exception as e:
@@ -303,10 +303,6 @@ class BrowserEngine:
         if self.driver:
             return True
 
-        # 先清掉上次强制退出遗留的浏览器，否则它会锁住配置目录，
-        # 导致新会话起不来、程序反复重开窗口
-        self._clean_stale_browsers()
-
         self.last_error = ""
         executable = self._resolve_driver_path()
         if executable:
@@ -316,6 +312,16 @@ class BrowserEngine:
             return self._launch(executable)
         except Exception as exc:
             self.driver = None
+            # 启动失败最常见的原因：上次强制退出遗留的 Chrome 仍占着配置目录。
+            # 此时才清理（而不是一上来就结束别人进程），减少被安全软件拦截的机会。
+            print("[BrowserEngine] 启动失败，检查是否有残留浏览器占用配置目录")
+            self._clean_stale_browsers()
+            try:
+                print("[BrowserEngine] 清理后重试启动")
+                return self._launch(executable)
+            except Exception as retry_exc:
+                self.driver = None
+                exc = retry_exc
             # 兜底：驱动缺失/不匹配时，自行下载一次再重试
             fallback = "" if executable else self._download_driver_fallback()
             if fallback:

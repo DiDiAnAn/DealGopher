@@ -3,6 +3,7 @@
 """
 import sys
 import os
+import atexit
 import logging
 import threading
 from datetime import datetime
@@ -212,6 +213,13 @@ class MainWindow(QMainWindow):
         self.check_timer = QTimer()
         self.check_timer.timeout.connect(self._check_and_fetch)
         self.check_timer.start(30000)
+
+        # 心跳：每分钟记一条，用于区分"程序自己崩了"和"被外部结束"
+        # 被 TerminateProcess（任务管理器/安全软件）杀掉时，日志会停在最后一次心跳
+        self._heartbeat_timer = QTimer(self)
+        self._heartbeat_timer.timeout.connect(self._log_heartbeat)
+        self._heartbeat_timer.start(60_000)
+        atexit.register(self._log_normal_exit)
 
         self._init_ui()
         self._fit_to_screen()
@@ -1728,6 +1736,21 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(500, self._process_alert_queue)
 
     # ==================== 关闭事件 ====================
+
+    def _log_heartbeat(self):
+        """心跳日志：进程被外部强杀时，日志会停在最后一次心跳时间"""
+        logger.debug(
+            f"[心跳] 运行中，商品 {len(self.products)} 个，"
+            f"队列 {len(self._fetch_queue)}，"
+            f"线程活跃={bool(self._current_worker and self._current_worker.isRunning())}"
+        )
+
+    def _log_normal_exit(self):
+        """atexit：只有正常结束进程才会执行；被强杀时不会出现这条"""
+        try:
+            logger.info("[退出] 程序正常结束（atexit）")
+        except Exception:
+            pass
 
     def closeEvent(self, event):
         """窗口关闭时保存数据并清理"""
