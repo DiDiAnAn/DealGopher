@@ -5,7 +5,7 @@
 """
 
 APP_NAME = "蹲价"
-APP_VERSION = "1.7.5"
+APP_VERSION = "1.7.6"
 AUTHOR = "安安"
 COPYRIGHT = "版权所有 © 2026 安安"
 

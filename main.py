@@ -56,7 +56,7 @@ matplotlib.rcParams["axes.unicode_minus"] = False
 
 from PyQt5.QtWidgets import QApplication, QMessageBox
 from PyQt5.QtCore import Qt
-from PyQt5.QtGui import QFont
+from PyQt5.QtGui import QFont, QIcon
 from browser_detector import detect_browsers
 from browser_dialog import ask_browser
 from models import DataStore
@@ -100,13 +100,48 @@ def choose_browser() -> str:
     return choice
 
 
+def _app_icon_path() -> str:
+    """
+    定位 app.ico
+
+    打包后 datas 里的资源会落到 _internal（sys._MEIPASS），
+    所以两个位置都找：exe 同级目录、打包内部目录。
+    """
+    candidates = []
+    bundle_dir = getattr(sys, "_MEIPASS", "")
+    if bundle_dir:
+        candidates.append(os.path.join(bundle_dir, "app.ico"))
+    candidates.append(os.path.join(BASE_DIR, "app.ico"))
+    for path in candidates:
+        if os.path.exists(path):
+            return path
+    return ""
+
+
 def main():
     # 高DPI支持
     QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
     QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
 
+    # Windows 10 任务栏图标：不设置 AppUserModelID 时，
+    # 任务栏会按 python.exe / 默认分组显示系统图标，而不是我们的图标。
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+                "AnAn.DunJia.Desktop"
+            )
+        except Exception:
+            pass
+
     app = QApplication(sys.argv)
     app.setFont(QFont("Microsoft YaHei", 9))
+
+    icon_path = _app_icon_path()
+    if icon_path:
+        app.setWindowIcon(QIcon(icon_path))
+    else:
+        print("[启动] 未找到 app.ico，使用系统默认图标")
 
     # 全局样式
     app.setStyleSheet("""

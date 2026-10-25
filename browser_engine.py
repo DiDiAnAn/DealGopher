@@ -69,7 +69,9 @@ class BrowserEngine:
         self.browser = browser if browser in self.BROWSER_NAMES else "chrome"
         self.headless = bool(headless)   # 服务器/容器环境无图形界面时必须开启
         self.binary_path = ""      # 由调用方按浏览器检测结果填入
-        self.last_error = ""       # 最近一次启动失败的可读原因
+        self.last_error = ""
+        # 抓取时是否最小化浏览器窗口（主窗口会按用户设置覆盖）
+        self.minimize_when_fetching = True       # 最近一次启动失败的可读原因
 
         # Linux / 容器：用环境变量直接指定 Chromium 可执行文件
         env_binary = os.environ.get("PM_CHROME_BINARY", "").strip()
@@ -328,6 +330,32 @@ class BrowserEngine:
             print(f"[BrowserEngine] 启动浏览器失败: {self.last_error}")
             return False
 
+    def minimize_window(self):
+        """
+        抓取时把浏览器窗口最小化
+
+        用户不希望每抓一个商品就在眼前弹一次浏览器；
+        最小化而不是隐藏，是为了随时能手动展开（比如要登录/看验证码）。
+        """
+        if not self.driver:
+            return
+        try:
+            self.driver.minimize_window()
+        except Exception:
+            pass
+
+    def restore_window(self):
+        """把浏览器窗口恢复正常/最大化（登录、需要人工操作时调用）"""
+        if not self.driver:
+            return
+        try:
+            self.driver.maximize_window()
+        except Exception:
+            try:
+                self.driver.set_window_rect(width=1400, height=1000, x=80, y=60)
+            except Exception:
+                pass
+
     def close_browser(self):
         """关闭浏览器"""
         if self.driver:
@@ -561,6 +589,10 @@ class BrowserEngine:
                 # 页面加载超时不算失败：DOM 通常已就绪，继续往下解析
                 print(f"[BrowserEngine] 页面加载超时/异常，继续尝试解析: {str(e)[:120]}")
             self._wait_page_ready(8)
+            # 页面已在加载，用户不需要盯着看：按设置把浏览器最小化，
+            # 避免每抓一个商品就有一个窗口弹到眼前（需要登录时会自动还原）
+            if getattr(self, "minimize_when_fetching", True):
+                self.minimize_window()
             if not self._sleep(1.5, abort):
                 return FetchResult(status=STATUS_UNKNOWN, status_text="已中断")
 

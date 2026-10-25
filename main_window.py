@@ -177,6 +177,13 @@ class MainWindow(QMainWindow):
         self.alert_sound_path = self._config.get("alert_sound_path", "")
         self._validate_alert_sound()
 
+        # 抓取时是否最小化浏览器窗口（默认开启，避免抓取时窗口不断弹到前面）
+        self.minimize_browser_on_fetch = bool(
+            self._config.get("minimize_browser_on_fetch", True)
+        )
+        if getattr(self, "engine", None) is not None:
+            self.engine.minimize_when_fetching = self.minimize_browser_on_fetch
+
         # 启动时是否清空历史记录
         # 默认 false：历史要跨次累积，否则每次打开都是空表，看不到"什么时候有货/无货"
         self.reset_history_on_startup = bool(
@@ -234,6 +241,8 @@ class MainWindow(QMainWindow):
         info = detect_browsers().get(browser, {})
         engine = BrowserEngine(browser=browser)
         engine.binary_path = info.get("path", "")
+        # 默认抓取时最小化（窗口真正创建后会按用户配置再设置一次）
+        engine.minimize_when_fetching = True
         if not engine.binary_path:
             logger.warning(f"[浏览器] 未检测到 {browser} 的安装路径，交由 Selenium 自动查找")
         return engine
@@ -631,6 +640,13 @@ class MainWindow(QMainWindow):
 
         # 工具菜单：历史记录默认跨次保留，需要时手动清空
         tools_menu = bar.addMenu("工具")
+
+        self.minimize_action = QAction("抓取时最小化浏览器窗口", self)
+        self.minimize_action.setCheckable(True)
+        self.minimize_action.setChecked(self.minimize_browser_on_fetch)
+        self.minimize_action.triggered.connect(self._toggle_minimize_browser)
+        tools_menu.addAction(self.minimize_action)
+
         clear_action = QAction("清空所有价格记录", self)
         clear_action.triggered.connect(self._clear_all_history)
         tools_menu.addAction(clear_action)
@@ -644,6 +660,21 @@ class MainWindow(QMainWindow):
         about_action = QAction("关于 / 版权信息", self)
         about_action.triggered.connect(self._show_about)
         help_menu.addAction(about_action)
+
+    def _toggle_minimize_browser(self, checked: bool):
+        """切换「抓取时最小化浏览器窗口」并持久化"""
+        self.minimize_browser_on_fetch = bool(checked)
+        self.engine.minimize_when_fetching = bool(checked)
+        try:
+            config = self.store.load_config()
+            config["minimize_browser_on_fetch"] = bool(checked)
+            self.store.save_config(config)
+            self._config = config
+        except Exception as e:
+            logger.warning(f"[设置] 保存最小化选项失败: {e}")
+        self.status_label.setText(
+            "抓取时将最小化浏览器窗口" if checked else "抓取时浏览器窗口保持可见"
+        )
 
     def _open_manual(self):
         """打开使用说明文档（优先程序目录，其次打包内的 _internal）"""
@@ -1138,6 +1169,8 @@ class MainWindow(QMainWindow):
 
     def _login_platform(self):
         """打开登录平台选择对话框"""
+        # 登录必须看得见浏览器，先把它还原出来
+        self.engine.restore_window()
         dialog = QDialog(self)
         dialog.setWindowTitle("登录购物平台")
         dialog.setFixedSize(300, 180)

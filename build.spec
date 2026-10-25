@@ -35,6 +35,9 @@ datas = []
 datas += collect_data_files("matplotlib")
 # 使用说明随程序分发，「帮助 → 使用说明」菜单直接打开它
 datas.append(("使用说明.txt", "."))
+# 窗口/任务栏图标：exe 图标由 icon= 指定，但运行时任务栏图标需要这个文件
+if os.path.exists(os.path.join(os.getcwd(), "app.ico")):
+    datas.append(("app.ico", "."))
 
 hiddenimports = [
     # PyQt5
