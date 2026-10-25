@@ -177,9 +177,10 @@ class MainWindow(QMainWindow):
         self.alert_sound_path = self._config.get("alert_sound_path", "")
         self._validate_alert_sound()
 
-        # 启动时是否清空历史记录（默认 true，保持"每次运行从零开始"的原有行为）
+        # 启动时是否清空历史记录
+        # 默认 false：历史要跨次累积，否则每次打开都是空表，看不到"什么时候有货/无货"
         self.reset_history_on_startup = bool(
-            self._config.get("reset_history_on_startup", True)
+            self._config.get("reset_history_on_startup", False)
         )
 
         # XLS记录文件路径（项目根目录 / exe 所在目录）
@@ -317,6 +318,35 @@ class MainWindow(QMainWindow):
 
         logger.info("[启动] 已清空所有商品的历史价格记录（内存 + products.json）")
 
+    def _clear_all_history(self):
+        """手动清空所有商品的记录（启动时默认不再清空，需要时用这里）"""
+        reply = QMessageBox.question(
+            self, "清空所有价格记录",
+            "确定清空所有商品的历史记录吗？\n\n"
+            "会同时清空右侧记录表和 price_records.xlsx，此操作不可撤销。\n"
+            "（商品本身和它们的刷新设置不受影响）",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        for product in self.products:
+            product.price_history.clear()
+        self.store.save_products(self.products)
+        self.record_table.setRowCount(0)
+        try:
+            write_xlsx(self.products, self.xls_file_path)
+        except PermissionError:
+            self._on_xls_locked()
+        except Exception as e:
+            logger.error(f"[清空记录] 写XLS失败: {e}")
+
+        self.chart.clear_chart()
+        self._update_records_table()
+        self._refresh_table()
+        logger.info("[清空记录] 用户手动清空了所有历史记录")
+        self.status_label.setText("已清空所有价格记录")
+
     # ==================== UI初始化 ====================
 
     def _init_ui(self):
@@ -402,22 +432,21 @@ class MainWindow(QMainWindow):
         left_layout.addWidget(table_label)
 
         self.table = QTableWidget()
-        # 列顺序：把「状态」提到前面，避免用户必须横向滚动才能看到有货/无货；
-        # 宽度按面板实际可用空间收紧，尽量不出现横向滚动条。
-        self.table.setColumnCount(9)
+        # 列设计原则：只保留"一眼要看"的信息，其余放到下方详情条里，
+        # 把宽度尽量留给商品名称（之前 9 列挤在一起，商品名被截得看不清）。
+        # 序号 / 商品名称(拉伸) / 平台 / 有货状态 / 当前价格 / 预期价格 / 下次刷新
+        self.table.setColumnCount(7)
         self.table.setHorizontalHeaderLabels([
-            "序号", "商品名称", "平台", "状态", "当前价格", "预期价格",
-            "上次刷新", "下次刷新", "刷新设置"
+            "序号", "商品名称", "平台", "有货状态", "当前价格", "预期价格", "下次刷新"
         ])
         self.table.setFont(QFont("Microsoft YaHei", 9))
         self.table.horizontalHeader().setFont(QFont("Microsoft YaHei", 9, QFont.Bold))
-        # 商品名称列自适应拉伸，其它列固定宽度（可拖动调整）
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
         self.table.horizontalHeader().setStretchLastSection(False)
-        for _col, _width in ((0, 45), (2, 52), (3, 64), (4, 84), (5, 84),
-                             (6, 122), (7, 76), (8, 72)):
+        for _col, _width in ((0, 42), (2, 50), (3, 82), (4, 88), (5, 88), (6, 82)):
             self.table.setColumnWidth(_col, _width)
+        self.table.setTextElideMode(Qt.ElideMiddle)   # 太长时省略中间，首尾都看得到
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SingleSelection)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
@@ -439,6 +468,19 @@ class MainWindow(QMainWindow):
             }
         """)
         left_layout.addWidget(self.table)
+
+        # 选中商品的详细信息条：把表格里放不下的内容（完整名称、规格、
+        # 刷新设置、上次刷新、状态原因）放这里，保证信息不丢、表格不挤。
+        self.detail_label = QLabel("选中一个商品可查看完整信息")
+        self.detail_label.setFont(QFont("Microsoft YaHei", 9))
+        self.detail_label.setWordWrap(True)
+        self.detail_label.setStyleSheet(
+            "color: #34495e; background: #f4f6f8; border: 1px solid #e0e4e8;"
+            " border-radius: 4px; padding: 6px;"
+        )
+        self.detail_label.setMinimumHeight(52)
+        self.detail_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        left_layout.addWidget(self.detail_label)
 
         splitter.addWidget(left_widget)
 
@@ -479,17 +521,19 @@ class MainWindow(QMainWindow):
         record_layout.addWidget(record_label)
 
         self.record_table = QTableWidget()
-        self.record_table.setColumnCount(6)
+        # 右侧面板较窄，去掉序号列，把宽度留给商品名称
+        self.record_table.setColumnCount(5)
         self.record_table.setHorizontalHeaderLabels([
-            "序号", "商品名称", "刷新日期时间", "状态", "当前价格", "预期价格"
+            "商品名称", "刷新时间", "有货状态", "当前价格", "预期价格"
         ])
         self.record_table.setFont(QFont("Microsoft YaHei", 9))
         self.record_table.horizontalHeader().setFont(QFont("Microsoft YaHei", 9, QFont.Bold))
         self.record_table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
-        self.record_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.record_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
         self.record_table.horizontalHeader().setStretchLastSection(False)
-        for _col, _width in ((0, 40), (2, 108), (3, 62), (4, 70), (5, 70)):
+        for _col, _width in ((1, 96), (2, 64), (3, 78), (4, 78)):
             self.record_table.setColumnWidth(_col, _width)
+        self.record_table.setTextElideMode(Qt.ElideMiddle)
         self.record_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.record_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.record_table.setAlternatingRowColors(True)
@@ -584,6 +628,12 @@ class MainWindow(QMainWindow):
     def _init_menu(self):
         bar = self.menuBar()
         bar.setFont(QFont("Microsoft YaHei", 9))
+
+        # 工具菜单：历史记录默认跨次保留，需要时手动清空
+        tools_menu = bar.addMenu("工具")
+        clear_action = QAction("清空所有价格记录", self)
+        clear_action.triggered.connect(self._clear_all_history)
+        tools_menu.addAction(clear_action)
 
         help_menu = bar.addMenu("帮助")
 
@@ -694,6 +744,13 @@ class MainWindow(QMainWindow):
         finally:
             self.table.blockSignals(False)
 
+        # 数据变了，详情条也要跟着更新（否则刷新后仍显示旧的上次刷新时间）
+        current_row = self.table.currentRow()
+        if 0 <= current_row < len(self.products):
+            self._update_detail_label(self.products[current_row])
+        else:
+            self._update_detail_label(None)
+
     def _refresh_table_rows(self):
         self.table.setRowCount(len(self.products))
         for i, product in enumerate(self.products):
@@ -702,36 +759,60 @@ class MainWindow(QMainWindow):
             self.table.setItem(i, 0, idx_item)
 
             name = product.name if product.name else "(未获取)"
-            if len(name) > 30:
-                name = name[:30] + "..."
             name_item = QTableWidgetItem(name)
+            # 名称列已占满剩余宽度，悬停仍可看完整名称与规格
+            tip = name
             if product.has_sku_lock():
-                name_item.setToolTip("已锁定规格：" + product.sku_display())
+                tip += "\n规格：" + product.sku_display()
             elif not getattr(product, "sku_auto", True):
-                name_item.setToolTip("已关闭自动规格识别（会抓页面默认显示的价格）")
+                tip += "\n（已关闭自动规格识别）"
+            name_item.setToolTip(tip)
             self.table.setItem(i, 1, name_item)
 
             platform_item = QTableWidgetItem(product.platform_display_name())
             platform_item.setTextAlignment(Qt.AlignCenter)
             self.table.setItem(i, 2, platform_item)
 
-            # ---- 当前价格：无货/下架时显示 --，但保留上次有效价作为提示 ----
+            # ---- 有货状态列：直接回答"有没有货" ----
+            if product.last_status == st.STATUS_NO_STOCK:
+                status_text, status_color = "无货", QColor("#e67e22")
+            elif product.last_status == st.STATUS_DELISTED:
+                status_text, status_color = "已下架", QColor("#7f8c8d")
+            elif product.last_status == st.STATUS_SKU_MISMATCH:
+                status_text, status_color = "规格失效", QColor("#c0392b")
+            elif product.last_status == st.STATUS_PRICE_RANGE:
+                status_text, status_color = "价格区间", QColor("#8e44ad")
+            elif product.last_status == st.STATUS_OK and product.current_price > 0:
+                status_text, status_color = "有货", QColor("#27ae60")
+            elif product.last_status == st.STATUS_UNKNOWN and not product.last_valid_price:
+                status_text, status_color = "抓取异常", QColor("#95a5a6")
+            else:
+                status_text, status_color = "待刷新", QColor("#95a5a6")
+
+            status_item = QTableWidgetItem(status_text)
+            status_item.setForeground(status_color)
+            status_item.setTextAlignment(Qt.AlignCenter)
+            status_item.setFont(QFont("Microsoft YaHei", 9, QFont.Bold))
+            detail = product.last_status_text or ""
+            if detail:
+                status_item.setToolTip(detail)
+            self.table.setItem(i, 3, status_item)
+
+            # ---- 当前价格：买不到时显示 --，但保留上次有效价作为提示 ----
             available = product.last_status == st.STATUS_OK
             if available and product.current_price > 0:
                 price_text = f"¥{product.current_price:.2f}"
-            elif product.last_valid_price > 0:
-                price_text = "--"
             else:
                 price_text = "--"
             price_item = QTableWidgetItem(price_text)
             price_item.setTextAlignment(Qt.AlignCenter)
-            if available and product.last_valid_price > 0:
-                price_item.setToolTip(f"上次有效价 ¥{product.last_valid_price:.2f}"
+            if product.last_valid_price > 0 and not available:
+                price_item.setToolTip(f"当前买不到；上次有效价 ¥{product.last_valid_price:.2f}"
                                       f"（{product.last_valid_time or '未知时间'}）")
             if available and product.is_price_reached():
                 price_item.setForeground(QColor("#e74c3c"))
                 price_item.setFont(QFont("Microsoft YaHei", 10, QFont.Bold))
-            elif not available and product.last_valid_price > 0:
+            elif not available:
                 price_item.setForeground(QColor("#bdc3c7"))
             self.table.setItem(i, 4, price_item)
 
@@ -744,46 +825,9 @@ class MainWindow(QMainWindow):
             expected_item.setForeground(QColor("#27ae60"))
             self.table.setItem(i, 5, expected_item)
 
-            last_refresh = product.last_refresh if product.last_refresh else "--"
-            refresh_item = QTableWidgetItem(last_refresh)
-            refresh_item.setTextAlignment(Qt.AlignCenter)
-            self.table.setItem(i, 6, refresh_item)
-
             countdown_item = QTableWidgetItem("--")
             countdown_item.setTextAlignment(Qt.AlignCenter)
-            self.table.setItem(i, 7, countdown_item)
-
-            setting_text = product.get_refresh_time_display()
-            setting_item = QTableWidgetItem(setting_text)
-            setting_item.setTextAlignment(Qt.AlignCenter)
-            self.table.setItem(i, 8, setting_item)
-
-            # ---- 状态列：优先显示库存/上下架状态 ----
-            if product.last_status == st.STATUS_NO_STOCK:
-                status_text, status_color = "无货", QColor("#e67e22")
-            elif product.last_status == st.STATUS_DELISTED:
-                status_text, status_color = "已下架", QColor("#7f8c8d")
-            elif product.last_status == st.STATUS_SKU_MISMATCH:
-                status_text, status_color = "规格失效", QColor("#c0392b")
-            elif product.last_status == st.STATUS_PRICE_RANGE:
-                status_text, status_color = "价格区间", QColor("#8e44ad")
-            elif product.last_status == st.STATUS_UNKNOWN and not product.last_valid_price:
-                status_text, status_color = "抓取异常", QColor("#95a5a6")
-            elif product.is_price_reached():
-                status_text, status_color = "已达标", QColor("#e74c3c")
-            elif product.current_price > 0:
-                status_text, status_color = "监控中", QColor("#27ae60")
-            else:
-                status_text, status_color = "待刷新", QColor("#95a5a6")
-
-            status_item = QTableWidgetItem(status_text)
-            status_item.setForeground(status_color)
-            status_item.setTextAlignment(Qt.AlignCenter)
-            status_item.setFont(QFont("Microsoft YaHei", 9, QFont.Bold))
-            detail = product.last_status_text or ""
-            if detail:
-                status_item.setToolTip(detail)
-            self.table.setItem(i, 3, status_item)
+            self.table.setItem(i, 6, countdown_item)
 
     def _update_countdown(self):
         """更新倒计时列"""
@@ -801,12 +845,12 @@ class MainWindow(QMainWindow):
                     minutes, seconds = divmod(remainder, 60)
                     countdown_text = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
 
-            item = self.table.item(i, 7)
+            item = self.table.item(i, 6)
             if item:
                 item.setText(countdown_text)
 
     def _on_row_selected(self, row, col, prev_row, prev_col):
-        """选中行时更新走势图"""
+        """选中行时更新走势图与下方详情条"""
         if 0 <= row < len(self.products):
             product = self.products[row]
             self.chart.update_chart(
@@ -814,6 +858,34 @@ class MainWindow(QMainWindow):
                 product.expected_price,
                 product.name
             )
+            self._update_detail_label(product)
+
+    def _update_detail_label(self, product):
+        """
+        更新“选中商品详情条”
+
+        表格只放关键列，完整信息（全名、规格、刷新设置、上次刷新、
+        状态原因）放这里：既能看到全部内容，又不会把表格挤窄。
+        """
+        if product is None:
+            self.detail_label.setText("选中一个商品可查看完整信息")
+            return
+
+        parts = [f"<b>{product.name or '(未获取)'}</b>"]
+
+        if product.has_sku_lock():
+            parts.append(f"规格：{product.sku_display()}")
+        elif not getattr(product, "sku_auto", True):
+            parts.append("规格：未锁定（已关闭自动识别）")
+
+        parts.append(f"刷新：{product.get_refresh_time_display()}")
+        parts.append(f"上次刷新：{product.last_refresh or '尚未刷新'}")
+
+        if product.last_status and product.last_status != st.STATUS_OK:
+            reason = f"（{product.last_status_text}）" if product.last_status_text else ""
+            parts.append(f"状态：{product.status_display()}{reason}")
+
+        self.detail_label.setText("　|　".join(parts))
 
     # ==================== 右键菜单 ====================
 
@@ -1364,13 +1436,18 @@ class MainWindow(QMainWindow):
         # 浏览器根本没起来时，给出明确原因（比"可能需要重新登录"准确得多）
         if self.engine.last_error:
             logger.error(f"[浏览器] 启动失败: {self.engine.last_error}")
+            # 浏览器起不来就别再一个个重试了：每试一个商品就重开一次窗口，
+            # 用户看到的就是"刷新一次弹一个浏览器"。这里直接中止本轮队列。
+            self._fetch_queue.clear()
             if not self._browser_error_shown:
                 self._browser_error_shown = True
                 QMessageBox.warning(
                     self,
                     "浏览器启动失败",
                     f"{self.engine.last_error}\n\n"
-                    "可以点击窗口右下角的「更换」换用另一个浏览器。",
+                    "本轮抓取已停止，避免反复弹出浏览器窗口。\n"
+                    "可以点击窗口右下角的「更换」换用另一个浏览器，"
+                    "或关闭浏览器窗口后点「立即刷新」重试。",
                 )
 
         self._process_fetch_queue()
@@ -1421,7 +1498,7 @@ class MainWindow(QMainWindow):
                     "name": product.name or "(未获取)",
                     "timestamp": record.timestamp,
                     "status": record_status,
-                    "status_text": st.display(record_status),
+                    "status_text": ("有货" if record_status == st.STATUS_OK else st.display(record_status)),
                     "detail": getattr(record, "status_text", "") or "",
                     "sku": getattr(record, "sku_text", "") or "",
                     "price": record.price if st.is_price_trusted(record_status) else 0.0,
@@ -1433,19 +1510,27 @@ class MainWindow(QMainWindow):
 
         self.record_table.setRowCount(len(all_records))
         for i, rec in enumerate(all_records):
-            idx_item = QTableWidgetItem(str(i + 1))
-            idx_item.setTextAlignment(Qt.AlignCenter)
-            self.record_table.setItem(i, 0, idx_item)
-
+            # 列 0：商品名称（拉伸列，悬停看规格）
             name_item = QTableWidgetItem(rec["name"])
-            name_item.setTextAlignment(Qt.AlignCenter)
+            name_item.setTextAlignment(Qt.AlignVCenter | Qt.AlignLeft)
+            tip = rec["name"]
             if rec["sku"]:
-                name_item.setToolTip("规格：" + rec["sku"])
-            self.record_table.setItem(i, 1, name_item)
+                tip += "\n规格：" + rec["sku"]
+            name_item.setToolTip(tip)
+            self.record_table.setItem(i, 0, name_item)
 
-            time_item = QTableWidgetItem(rec["timestamp"])
+            # 列 1：刷新时间（短格式省空间，悬停看完整时间）
+            stamp = rec["timestamp"] or ""
+            short_time = stamp
+            try:
+                dt = datetime.strptime(stamp, "%Y-%m-%d %H:%M:%S")
+                short_time = dt.strftime("%m-%d %H:%M")
+            except (ValueError, TypeError):
+                pass
+            time_item = QTableWidgetItem(short_time)
             time_item.setTextAlignment(Qt.AlignCenter)
-            self.record_table.setItem(i, 2, time_item)
+            time_item.setToolTip(stamp)
+            self.record_table.setItem(i, 1, time_item)
 
             # ---- 状态列 ----
             status_item = QTableWidgetItem(rec["status_text"])
@@ -1462,7 +1547,7 @@ class MainWindow(QMainWindow):
                 status_item.setForeground(QColor("#8e44ad"))
             if rec["detail"]:
                 status_item.setToolTip(rec["detail"])
-            self.record_table.setItem(i, 3, status_item)
+            self.record_table.setItem(i, 2, status_item)
 
             if rec["price"] > 0:
                 price_text = f"¥{rec['price']:.2f}"
@@ -1472,7 +1557,7 @@ class MainWindow(QMainWindow):
             price_item.setTextAlignment(Qt.AlignCenter)
             if rec["price"] <= 0:
                 price_item.setForeground(QColor("#bdc3c7"))
-            self.record_table.setItem(i, 4, price_item)
+            self.record_table.setItem(i, 3, price_item)
 
             if rec["expected_price"] > 0:
                 expected_text = f"¥{rec['expected_price']:.2f}"
@@ -1481,7 +1566,7 @@ class MainWindow(QMainWindow):
             expected_item = QTableWidgetItem(expected_text)
             expected_item.setTextAlignment(Qt.AlignCenter)
             expected_item.setForeground(QColor("#27ae60"))
-            self.record_table.setItem(i, 5, expected_item)
+            self.record_table.setItem(i, 4, expected_item)
 
         self._mark_xls_dirty()
 

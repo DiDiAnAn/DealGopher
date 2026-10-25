@@ -3,10 +3,12 @@
 """
 import json
 import os
+import subprocess
 import re
 import threading
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import List, Tuple
 
 from selenium import webdriver
@@ -249,10 +251,59 @@ class BrowserEngine:
 
         return (text[:200] if text else exc.__class__.__name__)
 
+    def _clean_stale_browsers(self):
+        """
+        清理仍占用本程序配置目录的残留浏览器进程
+
+        场景：程序被强制结束/崩溃时，Selenium 启动的 Chrome 不会跟着退出，
+        会一直占着 data/chrome_profile。下次启动时新会话拿不到配置目录，
+        Chrome 直接退出（报 "session not created: Chrome instance exited"），
+        程序于是反复重开浏览器窗口 —— 用户看到的就是"刷新一次开一个窗口"。
+        """
+        if os.name != "nt":
+            return
+        profile = os.path.abspath(self.profile_dir)
+        try:
+            script = (
+                "Get-CimInstance Win32_Process -Filter \"Name='chrome.exe'\" | "
+                "Where-Object { $_.CommandLine -like '*" + profile + "*' } | "
+                "ForEach-Object { $_.ProcessId }"
+            )
+            result = subprocess.run(
+                ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+                capture_output=True, text=True, timeout=15,
+                encoding="utf-8", errors="ignore",
+            )
+            pids = [line.strip() for line in (result.stdout or "").splitlines()
+                    if line.strip().isdigit()]
+            if not pids:
+                return
+            print(f"[BrowserEngine] 发现 {len(pids)} 个残留浏览器进程，正在清理")
+            for pid in pids:
+                subprocess.run(["taskkill", "/PID", pid, "/F", "/T"],
+                               capture_output=True, timeout=10)
+            time.sleep(1.0)
+        except Exception as e:
+            print(f"[BrowserEngine] 清理残留浏览器失败: {e}")
+            return
+
+        # 顺手删掉锁文件，避免 Chrome 认为配置目录仍在使用
+        for name in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
+            try:
+                path = Path(profile) / name
+                if path.exists() or path.is_symlink():
+                    path.unlink()
+            except Exception:
+                pass
+
     def start_browser(self) -> bool:
         """启动所选浏览器（使用固定用户数据目录，保持登录状态）"""
         if self.driver:
             return True
+
+        # 先清掉上次强制退出遗留的浏览器，否则它会锁住配置目录，
+        # 导致新会话起不来、程序反复重开窗口
+        self._clean_stale_browsers()
 
         self.last_error = ""
         executable = self._resolve_driver_path()
