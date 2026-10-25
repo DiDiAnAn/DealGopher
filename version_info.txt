@@ -19,7 +19,7 @@ VSVersionInfo(
                     StringStruct('CompanyName', '安安'),
                     StringStruct('FileDescription', '蹲价 - 商品价格监控与历史记录'),
                     StringStruct('FileVersion', '1.7.6'),
-                    StringStruct('InternalName', 'PriceMonitor'),
+                    StringStruct('InternalName', 'DealGopher'),
                     StringStruct('LegalCopyright', '版权所有 (C) 2026 安安 · 仅供个人使用，未经授权禁止分享或商用'),
                     StringStruct('OriginalFilename', '蹲价V1.7.6.exe'),
                     StringStruct('ProductName', '蹲价'),
