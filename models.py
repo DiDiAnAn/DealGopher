@@ -87,6 +87,8 @@ class Product:
         # ---- 规格锁定：要监控的具体版本/套餐 ----
         self.sku_spec: List[str] = []               # 例如 ["版本类型=中国大陆", "套餐=单机标配"]
         self.sku_recorded_at: str = ""              # 规格采集时间
+        # 是否允许自动识别并锁定规格（首次抓取时按链接里已选好的版本自动记录）
+        self.sku_auto: bool = True
 
     def _detect_platform(self, url: str) -> str:
         """按域名识别平台（规则集中在 platforms.py）"""
@@ -245,6 +247,7 @@ class Product:
             "last_valid_time": self.last_valid_time,
             "sku_spec": list(self.sku_spec),
             "sku_recorded_at": self.sku_recorded_at,
+            "sku_auto": self.sku_auto,
             "price_history": [r.to_dict() for r in self.price_history],
         }
 
@@ -271,6 +274,7 @@ class Product:
         p.last_valid_time = data.get("last_valid_time", data.get("last_refresh", ""))
         p.sku_spec = list(data.get("sku_spec", []) or [])
         p.sku_recorded_at = data.get("sku_recorded_at", "")
+        p.sku_auto = bool(data.get("sku_auto", True))
         p.price_history = [
             PriceRecord.from_dict(r) for r in data.get("price_history", [])
         ]

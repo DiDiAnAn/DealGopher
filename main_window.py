@@ -472,9 +472,9 @@ class MainWindow(QMainWindow):
         record_layout.addWidget(record_label)
 
         self.record_table = QTableWidget()
-        self.record_table.setColumnCount(5)
+        self.record_table.setColumnCount(6)
         self.record_table.setHorizontalHeaderLabels([
-            "序号", "商品名称", "刷新日期时间", "当前价格", "预期价格"
+            "序号", "商品名称", "刷新日期时间", "状态", "当前价格", "预期价格"
         ])
         self.record_table.setFont(QFont("Microsoft YaHei", 9))
         self.record_table.horizontalHeader().setFont(QFont("Microsoft YaHei", 9, QFont.Bold))
@@ -697,6 +697,8 @@ class MainWindow(QMainWindow):
             name_item = QTableWidgetItem(name)
             if product.has_sku_lock():
                 name_item.setToolTip("已锁定规格：" + product.sku_display())
+            elif not getattr(product, "sku_auto", True):
+                name_item.setToolTip("已关闭自动规格识别（会抓页面默认显示的价格）")
             self.table.setItem(i, 1, name_item)
 
             platform_item = QTableWidgetItem(product.platform_display_name())
@@ -996,6 +998,7 @@ class MainWindow(QMainWindow):
         product = self.products[index]
         product.sku_spec = list(specs)
         product.sku_recorded_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        product.sku_auto = True
         self.store.save_products(self.products)
         self._refresh_table()
         logger.info(f"[规格锁定] 商品{index + 1} 已锁定规格: {' / '.join(specs)}")
@@ -1023,10 +1026,12 @@ class MainWindow(QMainWindow):
             return
         product.sku_spec = []
         product.sku_recorded_at = ""
+        # 关闭自动识别，否则下次抓取又会把规格自动锁回去
+        product.sku_auto = False
         self.store.save_products(self.products)
         self._refresh_table()
-        logger.info(f"[规格锁定] 商品{row + 1} 已清除规格锁定")
-        self.status_label.setText("已清除规格锁定")
+        logger.info(f"[规格锁定] 商品{row + 1} 已清除规格锁定，并关闭自动识别")
+        self.status_label.setText("已清除规格锁定（已关闭自动识别）")
 
     # ==================== 提示音设置 ====================
 
@@ -1244,6 +1249,19 @@ class MainWindow(QMainWindow):
         if result.name:
             product.name = result.name
 
+        # 自动锁定规格：用户给的链接本身就带着选好的版本（淘宝链接含 skuId），
+        # 首次抓取时把页面当前选中的规格记下来，之后每次只抓这一款，
+        # 不需要用户手动右键「记录当前规格」。
+        if (getattr(product, "sku_auto", True) and not product.sku_spec
+                and result.sku_text
+                and result.status in (st.STATUS_OK, st.STATUS_NO_STOCK, st.STATUS_PRICE_RANGE)):
+            specs = [part.strip() for part in result.sku_text.split(" / ") if part.strip()]
+            if specs:
+                product.sku_spec = specs
+                product.sku_recorded_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                logger.info(f"[规格自动锁定] 商品{index + 1} [{prev_name[:20]}] "
+                            f"已记录规格: {' / '.join(specs)}")
+
         # 无论什么状态都落一条记录（价格字段对非 ok 状态无效）
         product.add_price_record(
             result.price, result.original_price,
@@ -1384,14 +1402,19 @@ class MainWindow(QMainWindow):
     # ==================== 价格记录表 ====================
 
     def _update_records_table(self):
-        """更新右侧价格记录表（全部商品的记录）"""
+        """更新右侧价格记录表（全部商品的记录，含状态列）"""
         all_records = []
         for product in self.products:
             for record in product.price_history:
+                record_status = getattr(record, "status", st.STATUS_OK) or st.STATUS_OK
                 all_records.append({
                     "name": product.name or "(未获取)",
                     "timestamp": record.timestamp,
-                    "price": record.price,
+                    "status": record_status,
+                    "status_text": st.display(record_status),
+                    "detail": getattr(record, "status_text", "") or "",
+                    "sku": getattr(record, "sku_text", "") or "",
+                    "price": record.price if st.is_price_trusted(record_status) else 0.0,
                     "expected_price": product.expected_price,
                 })
 
@@ -1406,11 +1429,30 @@ class MainWindow(QMainWindow):
 
             name_item = QTableWidgetItem(rec["name"])
             name_item.setTextAlignment(Qt.AlignCenter)
+            if rec["sku"]:
+                name_item.setToolTip("规格：" + rec["sku"])
             self.record_table.setItem(i, 1, name_item)
 
             time_item = QTableWidgetItem(rec["timestamp"])
             time_item.setTextAlignment(Qt.AlignCenter)
             self.record_table.setItem(i, 2, time_item)
+
+            # ---- 状态列 ----
+            status_item = QTableWidgetItem(rec["status_text"])
+            status_item.setTextAlignment(Qt.AlignCenter)
+            if rec["status"] == st.STATUS_OK:
+                status_item.setForeground(QColor("#27ae60"))
+            elif rec["status"] == st.STATUS_NO_STOCK:
+                status_item.setForeground(QColor("#e67e22"))
+            elif rec["status"] in (st.STATUS_DELISTED,):
+                status_item.setForeground(QColor("#7f8c8d"))
+            elif rec["status"] == st.STATUS_SKU_MISMATCH:
+                status_item.setForeground(QColor("#c0392b"))
+            else:
+                status_item.setForeground(QColor("#8e44ad"))
+            if rec["detail"]:
+                status_item.setToolTip(rec["detail"])
+            self.record_table.setItem(i, 3, status_item)
 
             if rec["price"] > 0:
                 price_text = f"¥{rec['price']:.2f}"
@@ -1418,7 +1460,9 @@ class MainWindow(QMainWindow):
                 price_text = "--"
             price_item = QTableWidgetItem(price_text)
             price_item.setTextAlignment(Qt.AlignCenter)
-            self.record_table.setItem(i, 3, price_item)
+            if rec["price"] <= 0:
+                price_item.setForeground(QColor("#bdc3c7"))
+            self.record_table.setItem(i, 4, price_item)
 
             if rec["expected_price"] > 0:
                 expected_text = f"¥{rec['expected_price']:.2f}"
@@ -1427,7 +1471,7 @@ class MainWindow(QMainWindow):
             expected_item = QTableWidgetItem(expected_text)
             expected_item.setTextAlignment(Qt.AlignCenter)
             expected_item.setForeground(QColor("#27ae60"))
-            self.record_table.setItem(i, 4, expected_item)
+            self.record_table.setItem(i, 5, expected_item)
 
         self._mark_xls_dirty()
 

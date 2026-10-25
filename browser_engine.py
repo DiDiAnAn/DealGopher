@@ -530,6 +530,14 @@ class BrowserEngine:
 
             # ---- 2) 规格锁定：选中指定版本/套餐 ----
             sku_text = ""
+            # 未锁定规格时：用户给的链接本身就带选好的版本（淘宝链接含 skuId），
+            # 页面打开时已选中正确规格 —— 直接读取当前选中项作为本次目标，
+            # 不再要求用户右键「记录当前规格」。
+            if not sku_spec and self._wait_for_sku_ready(5.0):
+                detected = self._read_selected_sku()
+                if detected:
+                    sku_spec = detected
+                    print(f"[BrowserEngine] 自动识别已选规格: {' / '.join(detected)}")
             if sku_spec:
                 applied, sku_text, message = self._apply_sku_spec(sku_spec)
                 if not applied:
@@ -631,47 +639,79 @@ class BrowserEngine:
         """
         判断当前选中规格是否可购买
 
-        依据：购买按钮的文案与禁用状态、页面上明确的缺货文案。
-        返回 (status, 说明文字)
+        判定依据（收紧后只认两种信号）：
+          1) 购买按钮（立即购买/加入购物车/马上抢…）的文案或禁用状态
+          2) 页面里完整的缺货短语（如"该套餐暂时缺货"）
+
+        特别注意：不能对整页做"售罄"子串匹配。
+        淘宝详情页常挂"数量即将售罄""即将抢光"这类营销角标，表示"卖得快"，
+        并不代表无货 —— 旧实现就是这样把在售商品误判成无货的。
         """
         try:
             info = self.driver.execute_script(r"""
                 function norm(s){return (s||'').replace(/\s/g,'');}
-                var noStockWords = ['无货','售罄','缺货','已抢光','补货中','到货通知','已售完','暂时缺货','该地区无货','无法购买'];
-                var buyWords = ['立即购买','加入购物车','马上抢','领券购买','立即抢购','立即下单','去购买','立即订购','购买','抢购'];
+                // 营销/紧迫感文案：含"售罄/抢光"但表示"快卖完"，必须排除
+                // 营销角标：含"售罄/抢光"但只是"快卖完"，必须整体剔除（长的放前面）
+                var promoWords = ['数量即将售罄','数量即将抢光','即将售罄','即将抢光','马上售罄',
+                                  '马上抢光','快售罄','快抢光','仅剩','剩余','热卖','抢购中'];
+                var noStockWords = ['无货','已售罄','售罄','缺货','已抢光','已售完','暂时缺货',
+                                    '该地区无货','无法购买','到货通知','补货中'];
+                var buyWords = ['立即购买','加入购物车','马上抢','领券购买','立即抢购','立即下单',
+                                '去购买','立即订购','立即抢'];
+                function stripPromo(t){
+                    var r = t;
+                    for (var i=0;i<promoWords.length;i++){ r = r.split(promoWords[i]).join(''); }
+                    return r;
+                }
+                // 只有"按钮类"元素才拿来做无货判断，避免把页面上的文字角标当成无货
+                function looksLikeButton(el){
+                    var tag = (el.tagName||'').toUpperCase();
+                    if (tag === 'BUTTON' || tag === 'A') return true;
+                    var cls = (el.className||'').toString();
+                    return /btn|button|Btn|Button/.test(cls);
+                }
                 var out = {found:false, disabled:false, text:'', noStockText:''};
+
                 var nodes = document.querySelectorAll('button,a,div,span');
                 var limit = Math.min(nodes.length, 4000);
                 for (var i=0;i<limit;i++){
                     var el = nodes[i];
+                    if (el.getClientRects().length === 0) continue;
                     var t = norm(el.innerText);
                     if (!t || t.length > 14) continue;
-                    if (!el.offsetParent) continue;
 
-                    // 先看是否本身就是无货文案（如按钮文字直接变成"已售罄"）
-                    var hitNoStock = '';
-                    for (var k=0;k<noStockWords.length;k++){
-                        if (t.indexOf(noStockWords[k])>=0) { hitNoStock = t; break; }
-                    }
-                    if (hitNoStock) { out.noStockText = hitNoStock; break; }
-
-                    // 再看是否是购买按钮
                     var isBuy = false;
                     for (var b=0;b<buyWords.length;b++){ if (t.indexOf(buyWords[b])>=0){isBuy=true;break;} }
-                    if (!isBuy) continue;
+                    var isAction = looksLikeButton(el);
+                    if (!isBuy && !isAction) continue;
 
-                    var dis = el.disabled === true ||
-                              (el.getAttribute && el.getAttribute('aria-disabled')==='true') ||
-                              /disabled|gray|unable/i.test((el.className||'').toString());
-                    out.found = true;
-                    out.disabled = out.disabled || dis;
-                    if (!out.text) out.text = t;
+                    // 购买按钮：记录是否可用
+                    if (isBuy){
+                        out.found = true;
+                        if (!out.text) out.text = t;
+                        var dis = el.disabled === true ||
+                                  (el.getAttribute && el.getAttribute('aria-disabled')==='true') ||
+                                  /disabled|unable/i.test((el.className||'').toString());
+                        if (dis) out.disabled = true;
+                    }
+
+                    // 无货文案（剔除营销词后再判断）
+                    var clean = stripPromo(t);
+                    for (var k=0;k<noStockWords.length;k++){
+                        if (clean.indexOf(noStockWords[k])>=0){ out.noStockText = t; break; }
+                    }
+                    if (out.noStockText) break;
                 }
-                // 页面显式缺货文案
+
+                // ② 页面完整缺货短语
                 if (!out.noStockText) {
-                    var body = norm(document.body ? document.body.innerText : '').slice(0, 6000);
-                    var phrases = ['该套餐暂时缺货','此规格暂时缺货','该规格暂时缺货','该商品暂时缺货','所选规格无货','该地区暂时无货'];
-                    for (var p=0;p<phrases.length;p++){ if (body.indexOf(phrases[p])>=0){ out.noStockText = phrases[p]; break; } }
+                    var body = norm(document.body ? document.body.innerText : '');
+                    var phrases = ['该套餐暂时缺货','此规格暂时缺货','该规格暂时缺货',
+                                   '该商品暂时缺货','所选规格无货','该地区暂时无货',
+                                   '商品已售完','该商品已下架'];
+                    for (var p=0;p<phrases.length;p++){
+                        if (body.indexOf(phrases[p])>=0){ out.noStockText = phrases[p]; break; }
+                    }
                 }
                 return out;
             """)
@@ -686,7 +726,6 @@ class BrowserEngine:
         if info.get("found") and info.get("disabled"):
             return (STATUS_NO_STOCK, info.get("text") or "购买按钮不可用")
         return (STATUS_OK, "")
-
     def _detect_price_range(self, platform: str) -> bool:
         """
         判断页面价格是否为"最低价起"的区间价
@@ -812,8 +851,14 @@ class BrowserEngine:
 
     @staticmethod
     def _norm_text(text: str) -> str:
-        """去掉所有空白字符，便于规格文本比对（页面文案里空格不固定）"""
-        return "".join(str(text or "").split())
+        """
+        归一化规格文本：去空白 + 去尾部标点
+
+        页面上规格文字常带句点/顿号（如 "2TB."），记录时可能没有，
+        不处理会出现"明明有这个规格却匹配不上"。
+        """
+        s = "".join(str(text or "").split())
+        return s.rstrip(".。·,，;；:：、-—_")
 
     def _click_sku_option(self, option_text: str) -> bool:
         """
@@ -827,8 +872,9 @@ class BrowserEngine:
         """
         try:
             return bool(self.driver.execute_script(r"""
-                var want = WANT_TEXT.replace(/\s/g,'');
                 function norm(s){return (s||'').replace(/\s/g,'');}
+                function trimPunct(s){return s.replace(/[.。·,，;；:：、\-—_'"“”‘’]+$/g,'');}
+                var want = trimPunct(norm(WANT_TEXT));
                 function inSku(el){
                     var p = el;
                     for (var k=0;k<8 && p;k++){
@@ -855,12 +901,17 @@ class BrowserEngine:
                         if (el.getClientRects().length === 0) continue;
                         if (el.children.length > 3) continue;
                         if (!inSku(el)) continue;
-                        var text = norm(el.innerText);
+                        var text = trimPunct(norm(el.innerText));
                         if (!text) continue;
                         if (text === want) return el;
                         if (allowPrefix && text.indexOf(want) === 0){
                             var extra = text.length - want.length;
                             if (extra <= 8 && extra < bestExtra){ best = el; bestExtra = extra; }
+                        }
+                        // 反向前缀：记录的规格比页面文字更长（多了标点/后缀）也要能命中
+                        if (allowPrefix && want.indexOf(text) === 0){
+                            var extra2 = want.length - text.length;
+                            if (extra2 <= 6 && extra2 < bestExtra){ best = el; bestExtra = extra2; }
                         }
                     }
                     return best;
