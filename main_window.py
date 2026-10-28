@@ -1117,7 +1117,9 @@ class MainWindow(QMainWindow):
         if index >= len(self.products):
             return
         product = self.products[index]
-        product.sku_spec = list(specs)
+        cleaned = [self.engine._strip_promo(s).strip() for s in specs]
+        cleaned = [s for s in cleaned if s]
+        product.sku_spec = cleaned or list(specs)
         product.sku_recorded_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         product.sku_auto = True
         self.store.save_products(self.products)
@@ -1372,13 +1374,43 @@ class MainWindow(QMainWindow):
         if result.name:
             product.name = result.name
 
+        # 规格自愈：促销文案/选项文字变化后，抓取层已自动采用当前选中规格，
+        # 这里把新的规格写回，避免下次又对不上
+        if getattr(result, "spec_healed", False) and result.sku_text:
+            healed = [self.engine._strip_promo(part).strip()
+                      for part in result.sku_text.split(" / ")]
+            healed = [s for s in healed if s]
+            if healed:
+                product.sku_spec = healed
+                product.sku_recorded_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                product.sku_fail_count = 0
+                logger.info(f"[规格自愈] 商品{index + 1} [{prev_name[:20]}] "
+                            f"规格文字已变化，更新为: {' / '.join(healed)}")
+
+        # 连续规格失效达到阈值：自动清除锁定，让下次抓取重新识别。
+        # 否则页面改版后，商品会永久停在"规格失效"而不再抓价。
+        if result.status == st.STATUS_SKU_MISMATCH:
+            product.sku_fail_count = int(getattr(product, "sku_fail_count", 0)) + 1
+            if product.sku_fail_count >= 3 and product.sku_spec and getattr(product, "sku_auto", True):
+                logger.warning(
+                    f"[规格失效] 商品{index + 1} [{prev_name[:20]}] 连续 "
+                    f"{product.sku_fail_count} 次对不上，已清除锁定并改为重新识别"
+                )
+                product.sku_spec = []
+                product.sku_recorded_at = ""
+                product.sku_fail_count = 0
+        elif result.status == st.STATUS_OK:
+            product.sku_fail_count = 0
+
         # 自动锁定规格：用户给的链接本身就带着选好的版本（淘宝链接含 skuId），
         # 首次抓取时把页面当前选中的规格记下来，之后每次只抓这一款，
         # 不需要用户手动右键「记录当前规格」。
         if (getattr(product, "sku_auto", True) and not product.sku_spec
                 and result.sku_text
                 and result.status in (st.STATUS_OK, st.STATUS_NO_STOCK, st.STATUS_PRICE_RANGE)):
-            specs = [part.strip() for part in result.sku_text.split(" / ") if part.strip()]
+            specs = [self.engine._strip_promo(part).strip()
+                     for part in result.sku_text.split(" / ")]
+            specs = [s for s in specs if s]
             if specs:
                 product.sku_spec = specs
                 product.sku_recorded_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -1548,6 +1580,12 @@ class MainWindow(QMainWindow):
 
         # 按时间从远到近排序
         all_records.sort(key=lambda r: r["timestamp"], reverse=False)
+
+        # 界面只显示最近 800 条：历史会越积越多（每个商品上限 500 条），
+        # 全量重建会让界面在每个商品抓完后卡一下；完整数据仍在 Excel 里
+        DISPLAY_LIMIT = 800
+        if len(all_records) > DISPLAY_LIMIT:
+            all_records = all_records[-DISPLAY_LIMIT:]
 
         self.record_table.setRowCount(len(all_records))
         for i, rec in enumerate(all_records):

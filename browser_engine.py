@@ -4,6 +4,7 @@
 import json
 import os
 import subprocess
+import sys
 import re
 import threading
 import time
@@ -35,6 +36,7 @@ class FetchResult:
     status: str = STATUS_UNKNOWN
     status_text: str = ""      # 页面原文或失败原因，便于排查
     sku_text: str = ""         # 本次实际选中的规格
+    spec_healed: bool = False  # 规格文字变化、已自动更新锁定
 
     @property
     def has_price(self) -> bool:
@@ -264,6 +266,12 @@ class BrowserEngine:
         """
         if os.name != "nt":
             return
+
+        # 如果还有另一个本程序实例在运行，绝不能清理 —— 那会把对方正在用的浏览器杀掉
+        if self._another_instance_running():
+            print("[BrowserEngine] 检测到另一个程序实例正在运行，跳过残留浏览器清理")
+            return
+
         profile = os.path.abspath(self.profile_dir)
         try:
             script = (
@@ -297,6 +305,24 @@ class BrowserEngine:
                     path.unlink()
             except Exception:
                 pass
+
+    @staticmethod
+    def _another_instance_running() -> bool:
+        """是否还有另一个本程序实例在运行（同名进程数 > 1）"""
+        try:
+            exe_name = os.path.splitext(os.path.basename(sys.executable or ""))[0]
+            if not exe_name:
+                return False
+            script = f"@(Get-Process -Name '{exe_name}' -ErrorAction SilentlyContinue).Count"
+            result = subprocess.run(
+                ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+                capture_output=True, text=True, timeout=10,
+                encoding="utf-8", errors="ignore",
+            )
+            count = int((result.stdout or "0").strip() or 0)
+            return count > 1
+        except Exception:
+            return False
 
     def start_browser(self) -> bool:
         """启动所选浏览器（使用固定用户数据目录，保持登录状态）"""
@@ -627,13 +653,25 @@ class BrowserEngine:
                 if detected:
                     sku_spec = detected
                     print(f"[BrowserEngine] 自动识别已选规格: {' / '.join(detected)}")
+            spec_healed = False
             if sku_spec:
                 applied, sku_text, message = self._apply_sku_spec(sku_spec)
                 if not applied:
-                    print(f"[BrowserEngine] 规格锁定失败: {message}；当前选中={sku_text!r}")
-                    return FetchResult(name=self._safe_name(platform),
-                                       status=STATUS_SKU_MISMATCH,
-                                       status_text=message, sku_text=sku_text)
+                    # 自愈：促销文案/选项文字变了，但多数分组仍能对上，
+                    # 说明还是同一款商品 —— 采用当前选中规格继续抓，并更新锁定
+                    current = self._read_selected_sku()
+                    overlap = self._spec_overlap(sku_spec, current)
+                    if current and overlap >= 0.5:
+                        sku_text = " / ".join(current)
+                        spec_healed = True
+                        print(f"[BrowserEngine] 规格文字已变化（重合度 {overlap:.0%}），"
+                              f"自动采用当前选中规格: {sku_text}")
+                    else:
+                        print(f"[BrowserEngine] 规格锁定失败: {message}；"
+                              f"当前选中={sku_text!r}；重合度={overlap:.0%}")
+                        return FetchResult(name=self._safe_name(platform),
+                                           status=STATUS_SKU_MISMATCH,
+                                           status_text=message, sku_text=sku_text)
                 # 选完规格后价格与库存会异步刷新
                 if not self._sleep(1.5, abort):
                     return FetchResult(status=STATUS_UNKNOWN, status_text="已中断")
@@ -668,7 +706,8 @@ class BrowserEngine:
                                    sku_text=sku_text)
 
             return FetchResult(name=name, price=price, original_price=original_price,
-                               status=STATUS_OK, sku_text=sku_text)
+                               status=STATUS_OK, sku_text=sku_text,
+                               spec_healed=spec_healed)
         except Exception as e:
             print(f"[BrowserEngine] 抓取商品信息失败: {e}")
             self._reset_if_dead()
@@ -861,6 +900,15 @@ class BrowserEngine:
             "return document.querySelectorAll("
             "'[class*=\"sku\"],[class*=\"Sku\"],[class*=\"valueItem\"]').length;"
         )
+        # 快速探测：无规格的商品（如硬盘）不该每次干等满 timeout
+        quick_deadline = time.time() + 1.5
+        while time.time() < quick_deadline:
+            try:
+                if int(self.driver.execute_script(probe) or 0) > 0:
+                    return True
+            except Exception:
+                pass
+            time.sleep(0.3)
         while time.time() < deadline:
             try:
                 count = self.driver.execute_script(probe)
@@ -874,6 +922,31 @@ class BrowserEngine:
                 pass
             time.sleep(0.5)
         return False
+
+    def _spec_overlap(self, locked, current) -> float:
+        """
+        计算"锁定规格"与"页面当前选中规格"的重合度
+
+        用来判断规格文字变化是否只是促销/文案变动（仍是同一款），
+        从而决定能不能自动采用页面当前选中的规格继续抓。
+        """
+        def keys(items):
+            out = []
+            for item in items or []:
+                norm = self._norm_text(str(item).split("=", 1)[-1])
+                if norm:
+                    out.append(norm)
+            return out
+
+        left, right = keys(locked), keys(current)
+        if not left or not right:
+            return 0.0
+
+        matched = 0
+        for a in left:
+            if any(a in b or b in a for b in right):
+                matched += 1
+        return matched / len(left)
 
     def _apply_sku_spec(self, sku_spec) -> Tuple[bool, str, str]:
         """
@@ -938,15 +1011,48 @@ class BrowserEngine:
             return (False, selected_text, "；".join(reasons))
         return (True, selected_text, "")
 
-    @staticmethod
-    def _norm_text(text: str) -> str:
+    # ---- 促销标语识别（双十一/618 等大促期间会频繁变化）----
+    # 只剔除"营销用语 + 金额/件数/期数"这类易变片段，
+    # 不动型号/容量/版本/颜色（2TB、16GB+512GB、数字版、港版 都要保留）。
+    PROMO_PATTERNS = [
+        # 【至高优惠800】【双11价】【前1000件半价】【赠品】等括号内容
+        r"【[^】]*(?:至高|优惠|券|补贴|满|减|立减|直降|折|期|免息|元|价|赠|礼|抢|秒杀|"
+        r"预售|定金|尾款|限量|双\s*11|双十一|618|会员|百亿|到手|特价|秒|半价)[^】]*】",
+        # （满300减50）（赠品）这类圆括号内容
+        r"（[^）]*(?:至高|优惠|券|补贴|满|减|立减|直降|折|期|免息|元|赠|礼|秒杀|"
+        r"预售|定金|尾款|限量|双\s*11|618|会员|百亿|到手)[^）]*）",
+        # 无括号的常见促销短语
+        r"至高优惠\s*\d*", r"立减\s*\d+", r"直降\s*\d+",
+        r"满\s*\d+\s*减\s*\d+", r"满\s*\d+\s*元?\s*可用",
+        r"前\s*\d+\s*件[^\s，,、]*", r"\d+\s*期免息", r"券后价?", r"尾款",
+        r"定金[^\s，,、]*", r"百亿补贴", r"限时秒杀", r"秒杀价",
+        r"双\s*11\s*(?:活动)?\s*(?:预售)?\s*价?", r"双十一\s*(?:活动)?\s*(?:预售)?\s*价?",
+        r"618\s*(?:活动)?\s*(?:预售)?\s*价?",
+        r"8\s*8\s*VIP[^\s，,、]*", r"会员(?:价|专享)?", r"到手价?",
+        r"限时特价", r"限时特卖", r"限量[^\s，,、]*", r"抢购中", r"仅剩\s*\d+\s*件?",
+        r"预售价?", r"活动价", r"专享价?", r"补贴价", r"秒杀", r"大促",
+        r"[（(]?赠[^\s，,、）)]*[）)]?",
+    ]
+
+    @classmethod
+    def _strip_promo(cls, text: str) -> str:
+        """去掉促销标语，避免活动文案一变规格就对不上"""
+        out = str(text or "")
+        for pattern in cls.PROMO_PATTERNS:
+            out = re.sub(pattern, "", out, flags=re.IGNORECASE)
+        # 清理残留的分隔符与多余空格
+        out = re.sub(r"\s{2,}", " ", out).strip(" 　-—_·,，、:：")
+        return out
+
+    @classmethod
+    def _norm_text(cls, text: str) -> str:
         """
         归一化规格文本：去空白 + 去尾部标点
 
         页面上规格文字常带句点/顿号（如 "2TB."），记录时可能没有，
         不处理会出现"明明有这个规格却匹配不上"。
         """
-        s = "".join(str(text or "").split())
+        s = "".join(cls._strip_promo(text).split())
         return s.rstrip(".。·,，;；:：、-—_")
 
     def _click_sku_option(self, option_text: str) -> bool:
@@ -962,8 +1068,9 @@ class BrowserEngine:
         try:
             return bool(self.driver.execute_script(r"""
                 function norm(s){return (s||'').replace(/\s/g,'');}
+                function stripPromo(s){return s.replace(/【[^】]*(至高|优惠|券|补贴|分期|立减|直降|限时|秒杀|折|元|期)[^】]*】/g,'');}
                 function trimPunct(s){return s.replace(/[.。·,，;；:：、\-—_'"“”‘’]+$/g,'');}
-                var want = trimPunct(norm(WANT_TEXT));
+                var want = trimPunct(norm(stripPromo(WANT_TEXT)));
                 function inSku(el){
                     var p = el;
                     for (var k=0;k<8 && p;k++){
@@ -990,7 +1097,7 @@ class BrowserEngine:
                         if (el.getClientRects().length === 0) continue;
                         if (el.children.length > 3) continue;
                         if (!inSku(el)) continue;
-                        var text = trimPunct(norm(el.innerText));
+                        var text = trimPunct(norm(stripPromo(el.innerText)));
                         if (!text) continue;
                         if (text === want) return el;
                         if (allowPrefix && text.indexOf(want) === 0){

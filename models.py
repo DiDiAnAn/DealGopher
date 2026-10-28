@@ -89,6 +89,9 @@ class Product:
         self.sku_recorded_at: str = ""              # 规格采集时间
         # 是否允许自动识别并锁定规格（首次抓取时按链接里已选好的版本自动记录）
         self.sku_auto: bool = True
+        # 连续规格失效次数：达到阈值后自动清除锁定，改为重新识别，
+        # 避免页面改版/促销文案变化后永久卡在"规格失效"
+        self.sku_fail_count: int = 0
 
     def _detect_platform(self, url: str) -> str:
         """按域名识别平台（规则集中在 platforms.py）"""
@@ -248,6 +251,7 @@ class Product:
             "sku_spec": list(self.sku_spec),
             "sku_recorded_at": self.sku_recorded_at,
             "sku_auto": self.sku_auto,
+            "sku_fail_count": self.sku_fail_count,
             "price_history": [r.to_dict() for r in self.price_history],
         }
 
@@ -275,6 +279,7 @@ class Product:
         p.sku_spec = list(data.get("sku_spec", []) or [])
         p.sku_recorded_at = data.get("sku_recorded_at", "")
         p.sku_auto = bool(data.get("sku_auto", True))
+        p.sku_fail_count = int(data.get("sku_fail_count", 0) or 0)
         p.price_history = [
             PriceRecord.from_dict(r) for r in data.get("price_history", [])
         ]
